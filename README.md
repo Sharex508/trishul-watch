@@ -1,4 +1,4 @@
-# Coin Price Monitor
+# Trishul Watch
 
 A standalone application for monitoring cryptocurrency prices in real-time, updating the database every 20 seconds with the latest prices from Binance API. Includes a React.js frontend for visualizing the data.
 
@@ -23,8 +23,8 @@ A standalone application for monitoring cryptocurrency prices in real-time, upda
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Sharex508/coin-monitor.git
-cd coin-monitor
+git clone https://github.com/Sharex508/trishul-watch.git
+cd trishul-watch
 ```
 
 2. Create a virtual environment and install dependencies for the backend:
@@ -47,8 +47,8 @@ Note: The application uses SQLite as the database, which doesn't require any add
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Sharex508/coin-monitor.git
-cd coin-monitor
+git clone https://github.com/Sharex508/trishul-watch.git
+cd trishul-watch
 ```
 
 2. Run with Docker Compose:

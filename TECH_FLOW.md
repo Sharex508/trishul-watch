@@ -1,4 +1,4 @@
-# Coin Price Monitor — Single Technical Flow Diagram
+# Trishul Watch — Single Technical Flow Diagram
 
 This file contains a single, consolidated tech flow diagram for the entire system (Frontend, Backend, Background Jobs, Data Stores, and the main API/data flows).
 

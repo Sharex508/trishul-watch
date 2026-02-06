@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="coin_price_monitor",
+    name="trishul_watch",
     version="0.1.0",
     packages=find_packages(),
     install_requires=[
@@ -18,10 +18,10 @@ setup(
     },
     author="Your Name",
     author_email="your.email@example.com",
-    description="A standalone application for monitoring cryptocurrency prices in real-time",
+    description="Trishul Watch: a standalone application for monitoring cryptocurrency prices in real-time",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/coin_price_monitor_project",
+    url="https://github.com/Sharex508/trishul-watch",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

@@ -1,6 +1,6 @@
-# Docker Build Guide for Coin Price Monitor
+# Docker Build Guide for Trishul Watch
 
-This guide provides detailed instructions on how to build and run the Coin Price Monitor application using Docker.
+This guide provides detailed instructions on how to build and run the Trishul Watch application using Docker.
 
 ## Prerequisites
 
@@ -45,7 +45,7 @@ docker-compose --version
 
 ## Project Structure
 
-The Coin Price Monitor application consists of three main services:
+The Trishul Watch application consists of three main services:
 
 1. **PostgreSQL Database**: Stores all cryptocurrency data and price history
 2. **Backend API Server**: FastAPI application that fetches data from Binance and provides API endpoints
@@ -58,8 +58,8 @@ Each service is defined in the `docker-compose.yml` file and has its own Dockerf
 ### Step 1: Clone the Repository (if you haven't already)
 
 ```bash
-git clone https://github.com/Sharex508/coin-monitor.git
-cd coin-monitor
+git clone https://github.com/Sharex508/trishul-watch.git
+cd trishul-watch
 ```
 
 ### Step 2: Build and Start the Containers
@@ -213,4 +213,4 @@ docker-compose up --build
 
 ## Conclusion
 
-Using Docker with Docker Compose makes it easy to run the entire Coin Price Monitor application stack with minimal setup. The containerized approach ensures consistency across different environments and simplifies the development workflow.
+Using Docker with Docker Compose makes it easy to run the entire Trishul Watch application stack with minimal setup. The containerized approach ensures consistency across different environments and simplifies the development workflow.

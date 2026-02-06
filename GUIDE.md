@@ -1,6 +1,6 @@
-# Coin Price Monitor - User Guide
+# Trishul Watch - User Guide
 
-This guide will help you run the Coin Price Monitor application and view the UI in your browser. You can choose between SQLite (simpler) or PostgreSQL (more powerful) for the database.
+This guide will help you run the Trishul Watch application and view the UI in your browser. You can choose between SQLite (simpler) or PostgreSQL (more powerful) for the database.
 
 ## Prerequisites
 

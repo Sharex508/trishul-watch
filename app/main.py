@@ -38,7 +38,7 @@ logging.basicConfig(
 )
 
 # Create FastAPI app
-app = FastAPI(title="Coin Price Monitor API", description="API for monitoring cryptocurrency prices with AI Patterns")
+app = FastAPI(title="Trishul Watch API", description="API for monitoring cryptocurrency prices with AI Patterns")
 
 # Configure CORS
 origins = [

@@ -71,7 +71,7 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Coin Price Monitor</h1>
+        <h1>Trishul Watch</h1>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button className={`admin-button ${tab==='monitor'?'active':''}`} onClick={() => setTab('monitor')}>Monitor</button>
           <button className={`admin-button ${tab==='trading'?'active':''}`} onClick={() => setTab('trading')}>Trading</button>

@@ -115,7 +115,7 @@ def run_test():
 
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description='Run the Coin Price Monitor application.')
+    parser = argparse.ArgumentParser(description='Run the Trishul Watch application.')
     parser.add_argument('--init-db', action='store_true', help='Initialize the database')
     parser.add_argument('--test', action='store_true', help='Run the test script')
     parser.add_argument('--api', action='store_true', help='Run the API server')
