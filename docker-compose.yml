@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Enable BuildKit by default
 x-build-args: &build-args
   DOCKER_BUILDKIT: 1
@@ -46,6 +44,10 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 8000
       DEBUG: 'False'
+      INTRADAY_DISABLE_STOP: 'true'
+      INTRADAY_STOPLOSS_PCT: '0'
+      INTRADAY_STOPLOSS_LIMIT_PCT: '0'
+      INTRADAY_SYNC_LIMITS: 'true'
     ports:
       - "8000:8000"
     command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000

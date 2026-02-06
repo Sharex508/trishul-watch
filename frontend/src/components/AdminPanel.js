@@ -6,8 +6,8 @@ import './AdminPanel.css';
 const API_URL = process.env.REACT_APP_API_URL || '';
 
 const AdminPanel = () => {
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState(''); // 'success' or 'error'
@@ -31,27 +31,38 @@ const AdminPanel = () => {
     }
   };
 
-  const handleSaveCredentials = () => {
-    // Save credentials to localStorage
-    localStorage.setItem('binanceClientId', clientId);
-    localStorage.setItem('binanceClientSecret', clientSecret);
-    
-    setMessage('Credentials saved successfully.');
-    setMessageType('success');
-    
-    // Clear message after 3 seconds
-    setTimeout(() => {
-      setMessage('');
-    }, 3000);
+  const handleSaveCredentials = async () => {
+    try {
+      // Save credentials to localStorage
+      localStorage.setItem('binanceApiKey', apiKey);
+      localStorage.setItem('binanceApiSecret', apiSecret);
+
+      await axios.post(`${API_URL}/api/trading/credentials`, {
+        api_key: apiKey,
+        api_secret: apiSecret
+      });
+
+      setMessage('Credentials saved successfully.');
+      setMessageType('success');
+    } catch (error) {
+      console.error('Error saving credentials:', error);
+      setMessage(error.response?.data?.detail || 'Error saving credentials. Please try again.');
+      setMessageType('error');
+    } finally {
+      // Clear message after 3 seconds
+      setTimeout(() => {
+        setMessage('');
+      }, 3000);
+    }
   };
 
   // Load credentials from localStorage on component mount
   React.useEffect(() => {
-    const savedClientId = localStorage.getItem('binanceClientId');
-    const savedClientSecret = localStorage.getItem('binanceClientSecret');
-    
-    if (savedClientId) setClientId(savedClientId);
-    if (savedClientSecret) setClientSecret(savedClientSecret);
+    const savedApiKey = localStorage.getItem('binanceApiKey') || localStorage.getItem('binanceClientId');
+    const savedApiSecret = localStorage.getItem('binanceApiSecret') || localStorage.getItem('binanceClientSecret');
+
+    if (savedApiKey) setApiKey(savedApiKey);
+    if (savedApiSecret) setApiSecret(savedApiSecret);
   }, []);
 
   return (
@@ -60,34 +71,34 @@ const AdminPanel = () => {
       
       <div className="credentials-section">
         <h3>Binance API Credentials</h3>
-        <p>Enter your Binance API credentials to enable buy/sell functionality.</p>
+        <p>Enter your Binance API key/secret to enable live spot trading.</p>
         
         <div className="form-group">
-          <label htmlFor="clientId">Client ID:</label>
+          <label htmlFor="apiKey">API Key:</label>
           <input
             type="text"
-            id="clientId"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            placeholder="Enter your Binance Client ID"
+            id="apiKey"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="Enter your Binance API key"
           />
         </div>
         
         <div className="form-group">
-          <label htmlFor="clientSecret">Client Secret:</label>
+          <label htmlFor="apiSecret">API Secret:</label>
           <input
             type="password"
-            id="clientSecret"
-            value={clientSecret}
-            onChange={(e) => setClientSecret(e.target.value)}
-            placeholder="Enter your Binance Client Secret"
+            id="apiSecret"
+            value={apiSecret}
+            onChange={(e) => setApiSecret(e.target.value)}
+            placeholder="Enter your Binance API secret"
           />
         </div>
         
         <button 
           className="save-button"
           onClick={handleSaveCredentials}
-          disabled={!clientId || !clientSecret}
+          disabled={!apiKey || !apiSecret}
         >
           Save Credentials
         </button>

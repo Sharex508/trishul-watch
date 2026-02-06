@@ -1,6 +1,6 @@
 # Use multi-stage build for smaller final image
 # Stage 1: Build dependencies
-FROM python:3.9-slim AS builder
+FROM python:3.11-slim AS builder
 
 # Add network configuration to help with IPv6 connectivity issues
 ENV DOCKER_OPTS="--ipv6=false"
@@ -22,7 +22,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Stage 2: Final image
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 # Add network configuration to help with IPv6 connectivity issues
 ENV DOCKER_OPTS="--ipv6=false"

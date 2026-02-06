@@ -12,6 +12,7 @@ export default function PatternsPanel() {
   const [patterns, setPatterns] = useState([]);
   const [active, setActive] = useState(null);
   const [regime, setRegime] = useState(null);
+  const [events, setEvents] = useState([]);
   const [error, setError] = useState('');
 
   // Load symbols from existing monitors
@@ -58,13 +59,15 @@ export default function PatternsPanel() {
           fetch(`${API_URL}/api/patterns/active?symbol=${symbol}&timeframe=${timeframe}`),
           fetch(`${API_URL}/api/regime/current?symbol=${symbol}&timeframe=${timeframe}`),
         ]);
-        const [c, f, a, r] = await Promise.all([
-          cRes.json(), fRes.json(), aRes.json(), rRes.json()
+        const evRes = await fetch(`${API_URL}/api/ai/patterns/recent?symbol=${symbol}&limit=40`);
+        const [c, f, a, r, ev] = await Promise.all([
+          cRes.json(), fRes.json(), aRes.json(), rRes.json(), evRes.json()
         ]);
         setCandles(Array.isArray(c) ? c : []);
         setFeatures(Array.isArray(f) ? f : []);
         setActive(a && Object.keys(a).length ? a : null);
         setRegime(r && Object.keys(r).length ? r : null);
+        setEvents(Array.isArray(ev) ? ev : []);
       } catch (e) {
         setError(e.message || String(e));
       }
@@ -105,7 +108,7 @@ export default function PatternsPanel() {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
         <section>
-          <h3 style={{ margin: '8px 0' }}>Latest Features</h3>
+          <h3 style={{ margin: '8px 0' }}>Latest Features (vol-normalized)</h3>
           {!latestFeature && <div style={{ color: '#9ca3af' }}>No features yet — ingestion will populate after first minute.</div>}
           {latestFeature && (
             <table className="admin-table">
@@ -118,6 +121,11 @@ export default function PatternsPanel() {
                   <th>Ret 1</th>
                   <th>Ret 5</th>
                   <th>Ret 15</th>
+                  <th>Ret z1</th>
+                  <th>Vol</th>
+                  <th>RSI</th>
+                  <th>MACD hist</th>
+                  <th>Boll W</th>
                 </tr>
               </thead>
               <tbody>
@@ -130,6 +138,11 @@ export default function PatternsPanel() {
                     <td>{Number(f.ret_1 || 0).toFixed(5)}</td>
                     <td>{Number(f.ret_5 || 0).toFixed(5)}</td>
                     <td>{Number(f.ret_15 || 0).toFixed(5)}</td>
+                    <td>{Number(f.ret_z1 || 0).toFixed(3)}</td>
+                    <td>{Number(f.volatility || 0).toFixed(5)}</td>
+                    <td>{Number(f.rsi || 0).toFixed(2)}</td>
+                    <td>{Number(f.macd_hist || 0).toFixed(5)}</td>
+                    <td>{Number(f.boll_width || 0).toFixed(5)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -161,6 +174,41 @@ export default function PatternsPanel() {
                     <td>{Number(c.low || 0).toFixed(8)}</td>
                     <td>{Number(c.close || 0).toFixed(8)}</td>
                     <td>{Number(c.volume || 0).toFixed(3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section>
+          <h3 style={{ margin: '8px 0' }}>Recent Pattern Events</h3>
+          {(!events || events.length === 0) && <div style={{ color: '#9ca3af' }}>No pattern matches yet.</div>}
+          {events && events.length > 0 && (
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>TF</th>
+                  <th>Dir</th>
+                  <th>Score</th>
+                  <th>pct change</th>
+                  <th>consistency</th>
+                  <th>vol</th>
+                  <th>vol z</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((e, idx) => (
+                  <tr key={idx}>
+                    <td>{e.detected_at ? new Date(e.detected_at).toLocaleTimeString() : ''}</td>
+                    <td>{e.timeframe}</td>
+                    <td style={{ color: e.direction === 'incremental' ? '#22c55e' : '#ef4444', fontWeight: 600 }}>{e.direction}</td>
+                    <td>{Number(e.score || 0).toFixed(3)}</td>
+                    <td>{Number(e.pct_change || 0).toFixed(4)}</td>
+                    <td>{Number(e.consistency || 0).toFixed(3)}</td>
+                    <td>{Number(e.volatility || 0).toFixed(5)}</td>
+                    <td>{Number(e.volume_z || 0).toFixed(3)}</td>
                   </tr>
                 ))}
               </tbody>

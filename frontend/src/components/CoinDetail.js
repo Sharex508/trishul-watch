@@ -86,11 +86,11 @@ const CoinDetail = ({ symbol, onBack }) => {
 
   const handleBuy = async () => {
     // Get credentials from localStorage
-    const clientId = localStorage.getItem('binanceClientId');
-    const clientSecret = localStorage.getItem('binanceClientSecret');
+    const apiKey = localStorage.getItem('binanceApiKey') || localStorage.getItem('binanceClientId');
+    const apiSecret = localStorage.getItem('binanceApiSecret') || localStorage.getItem('binanceClientSecret');
 
-    if (!clientId || !clientSecret) {
-      setTradeMessage('Please set your Binance API credentials in the Admin Panel first.');
+    if (!apiKey || !apiSecret) {
+      setTradeMessage('Please set your Binance API key/secret in the Admin Panel first.');
       setTradeMessageType('error');
       return;
     }
@@ -108,8 +108,8 @@ const CoinDetail = ({ symbol, onBack }) => {
       const response = await axios.post(`${API_URL}/api/trade/buy`, {
         symbol,
         amount: buyAmount,
-        client_id: clientId,
-        client_secret: clientSecret
+        api_key: apiKey,
+        api_secret: apiSecret
       });
 
       setTradeMessage(response.data.message);
@@ -125,11 +125,11 @@ const CoinDetail = ({ symbol, onBack }) => {
 
   const handleSell = async () => {
     // Get credentials from localStorage
-    const clientId = localStorage.getItem('binanceClientId');
-    const clientSecret = localStorage.getItem('binanceClientSecret');
+    const apiKey = localStorage.getItem('binanceApiKey') || localStorage.getItem('binanceClientId');
+    const apiSecret = localStorage.getItem('binanceApiSecret') || localStorage.getItem('binanceClientSecret');
 
-    if (!clientId || !clientSecret) {
-      setTradeMessage('Please set your Binance API credentials in the Admin Panel first.');
+    if (!apiKey || !apiSecret) {
+      setTradeMessage('Please set your Binance API key/secret in the Admin Panel first.');
       setTradeMessageType('error');
       return;
     }
@@ -147,8 +147,8 @@ const CoinDetail = ({ symbol, onBack }) => {
       const response = await axios.post(`${API_URL}/api/trade/sell`, {
         symbol,
         amount: sellAmount,
-        client_id: clientId,
-        client_secret: clientSecret
+        api_key: apiKey,
+        api_secret: apiSecret
       });
 
       setTradeMessage(response.data.message);

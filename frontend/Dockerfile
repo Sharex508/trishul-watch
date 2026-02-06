@@ -1,5 +1,5 @@
 # Use a single stage build for simplicity
-FROM node:16-alpine
+FROM node:18-alpine
 
 # Add network configuration to help with IPv6 connectivity issues
 ENV DOCKER_OPTS="--ipv6=false"

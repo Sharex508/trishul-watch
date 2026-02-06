@@ -1,12 +1,13 @@
 import logging
 import os
 import sqlite3
-import requests
 import time
+import requests
 from fastapi import HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from .coin_price_monitor import get_database_connection, get_all_coins, fetch_all_prices, get_price
 
 # Import PostgreSQL libraries if available
 try:
@@ -638,6 +639,17 @@ def get_coin_price_history(symbol: str):
 
         if not result:
             logging.warning(f"No coin monitor record found for {symbol}")
+            # Try to auto-add the coin so the UI doesn't break on unknown symbols
+            try:
+                from .coin_price_monitor import fetch_symbol_price, add_coin
+                price = fetch_symbol_price(symbol, use_cache=True)
+                if price:
+                    added = add_coin(symbol, price)
+                    if added:
+                        logging.info(f"Auto-added {symbol} to coin_monitor; retrying history fetch")
+                        return get_coin_price_history(symbol)
+            except Exception as e:
+                logging.warning(f"Auto-add for {symbol} failed: {e}")
             return None
 
         # Create a structured representation of the price history
@@ -715,50 +727,59 @@ def get_recent_trades(symbol: str):
     Returns:
         dict: A dictionary containing recent trade statistics and analysis
     """
+    def _empty(msg: str = ""):
+        return {
+            "symbol": symbol,
+            "period": "30 seconds",
+            "total_trades": 0,
+            "buy_trades": 0,
+            "sell_trades": 0,
+            "buy_volume": 0,
+            "sell_volume": 0,
+            "buy_percentage": 0,
+            "sell_percentage": 0,
+            "average_trade_size": 0,
+            "trend": "Neutral",
+            "error": msg,
+            "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
+        }
+
     try:
         # Fetch recent trades from Binance API (last 30 seconds)
-        # Binance API returns trades in descending order (newest first)
         current_time_ms = int(time.time() * 1000)
         thirty_secs_ago_ms = current_time_ms - (30 * 1000)  # 30 seconds in milliseconds
 
-        # First get the most recent 1000 trades (API limit)
-        response = requests.get(
-            f'https://api.binance.com/api/v3/trades',
-            params={
-                'symbol': symbol,
-                'limit': 1000
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        trades = response.json()
+        try:
+            response = requests.get(
+                f'https://api.binance.com/api/v3/trades',
+                params={
+                    'symbol': symbol,
+                    'limit': 1000
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            trades = response.json()
+        except Exception as e:
+            logging.warning(f"Trades fetch failed for {symbol}: {e}")
+            return _empty(str(e))
 
         # Filter trades from the last 30 seconds
-        recent_trades = [trade for trade in trades if trade['time'] >= thirty_secs_ago_ms]
+        try:
+            recent_trades = [trade for trade in trades if trade.get('time', 0) >= thirty_secs_ago_ms]
+        except Exception:
+            recent_trades = []
 
         if not recent_trades:
-            return {
-                "symbol": symbol,
-                "period": "30 seconds",
-                "total_trades": 0,
-                "buy_trades": 0,
-                "sell_trades": 0,
-                "buy_volume": 0,
-                "sell_volume": 0,
-                "buy_percentage": 0,
-                "sell_percentage": 0,
-                "average_trade_size": 0,
-                "trend": "Neutral",
-                "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
-            }
+            return _empty("")
 
         # Analyze trades
-        buy_trades = [trade for trade in recent_trades if trade['isBuyerMaker'] == False]
-        sell_trades = [trade for trade in recent_trades if trade['isBuyerMaker'] == True]
+        buy_trades = [trade for trade in recent_trades if trade.get('isBuyerMaker') == False]
+        sell_trades = [trade for trade in recent_trades if trade.get('isBuyerMaker') == True]
 
         # Calculate volumes
-        buy_volume = sum(float(trade['qty']) for trade in buy_trades)
-        sell_volume = sum(float(trade['qty']) for trade in sell_trades)
+        buy_volume = sum(float(trade.get('qty', 0) or 0) for trade in buy_trades)
+        sell_volume = sum(float(trade.get('qty', 0) or 0) for trade in sell_trades)
         total_volume = buy_volume + sell_volume
 
         # Calculate percentages
@@ -793,22 +814,13 @@ def get_recent_trades(symbol: str):
         }
     except Exception as e:
         logging.error(f"Error getting recent trades for {symbol}: {e}")
-        return {
-            "symbol": symbol,
-            "error": str(e),
-            "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
-        }
+        return _empty(str(e))
 
 def update_latest_prices():
     """Update the latest prices for all coins in the coin_monitor table."""
     try:
-        # Fetch current prices from Binance API
-        response = requests.get('https://api.binance.com/api/v3/ticker/price', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-
-        # Create a dictionary of symbol -> price for easy lookup
-        price_dict = {item['symbol']: float(item['price']) for item in price_data}
+        # Fetch current prices (shared bulk fetch)
+        price_dict = fetch_all_prices()
 
         connection, cursor = get_database_connection()
 

@@ -21,9 +21,11 @@ from .coin_monitor import (
     CoinMonitor,
     CoinMonitorUpdate
 )
-from .coin_price_monitor import start_price_monitor, add_coin, force_update_all_price_histories, update_initial_prices, get_database_connection
+from .coin_price_monitor import start_price_monitor, add_coin, force_update_all_price_histories, update_initial_prices, get_database_connection, get_price, seed_coin_monitor_if_empty
 from .trading import trading_manager
-from .ai_pipeline import start_ai_background_jobs, _is_postgres, _q, pattern_discovery
+from .ai_pipeline import start_ai_background_jobs, is_pg, _q, pattern_discovery
+from .zone_engine import run_zone_detection, get_zone_by_id, plan_entry_for_zone, persist_entry_plan
+import pathlib
 
 # Configure logging
 logging.basicConfig(
@@ -63,6 +65,13 @@ def startup_price_update():
     global price_monitor_thread
     # Start the price monitor that updates every 2 seconds
     price_monitor_thread = start_price_monitor()
+    try:
+        # Ensure we have symbols to work with; seed top USDT movers if empty
+        seeded = seed_coin_monitor_if_empty()
+        if seeded:
+            logging.info(f"Seeded {seeded} symbols into coin_monitor")
+    except Exception as e:
+        logging.warning(f"Seeding coin_monitor failed at startup: {e}")
     # Start AI background jobs (candles + features)
     try:
         start_ai_background_jobs()
@@ -82,7 +91,14 @@ def shutdown_price_update():
 def trading_status():
     """Return whether the paper-trading loop is enabled."""
     try:
-        return {"enabled": trading_manager.enabled}
+        return {
+            "enabled": trading_manager.enabled,
+            "coin_brain_symbol": trading_manager.coin_brain_symbol,
+            "coin_brain_paper": trading_manager.coin_brain_paper if trading_manager.coin_brain_symbol else None,
+            "strategy_mode": trading_manager.strategy_mode,
+            "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True),
+            "intraday_enabled": getattr(trading_manager, "intraday_enabled", False),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -91,7 +107,17 @@ def trading_start():
     """Start paper-trading loop that operates on live prices updated by the monitor."""
     try:
         trading_manager.start()
-        return {"enabled": True}
+        return {"enabled": True, "strategy_mode": trading_manager.strategy_mode, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/trading/intraday-start", response_model=dict)
+def trading_intraday_start(payload: dict = Body(default={})):
+    """Start intraday loop modeled after the legacy trade.py flow."""
+    try:
+        paper = bool(payload.get("paper", True))
+        trading_manager.start_intraday(paper=paper)
+        return {"enabled": trading_manager.enabled, "strategy_mode": trading_manager.strategy_mode, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -100,7 +126,8 @@ def trading_stop():
     """Stop paper-trading loop."""
     try:
         trading_manager.stop()
-        return {"enabled": False}
+        trading_manager.stop_coin_brain()
+        return {"enabled": False, "strategy_mode": trading_manager.strategy_mode, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -109,7 +136,65 @@ def trading_reset():
     """Clear all paper trade entries (trade_logs) and reset cooldowns."""
     try:
         trading_manager.reset()
+        trading_manager.stop_coin_brain()
+        return {"ok": True, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/trading/credentials", response_model=dict)
+def trading_credentials(payload: BinanceCredentialsRequest = Body(...)):
+    """
+    Store Binance API key/secret for live spot trading.
+    """
+    try:
+        ok = trading_manager.set_binance_credentials(payload.api_key, payload.api_secret)
+        if not ok:
+            raise HTTPException(status_code=400, detail="API key/secret required")
         return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/trading/coin-start", response_model=dict)
+def trading_coin_start(payload: dict = Body(...)):
+    """
+    Start single-symbol coin brain trading with optional paper flag.
+    Body: { "symbol": "BTCUSDT", "paper": true }
+    """
+    try:
+        symbol = payload.get("symbol")
+        paper = bool(payload.get("paper", True))
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        trading_manager.start()
+        trading_manager.start_coin_brain(symbol, paper=paper)
+        return {"enabled": True, "symbol": symbol, "paper": paper, "strategy_mode": trading_manager.strategy_mode, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/trading/portfolio", response_model=dict)
+def trading_portfolio():
+    """Paper portfolio snapshot (cash, open positions, unrealized pnl)."""
+    try:
+        return trading_manager.portfolio()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/trading/intraday-limits", response_model=dict)
+def get_intraday_limits():
+    try:
+        return trading_manager.get_intraday_limits()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/trading/intraday-limits", response_model=dict)
+def set_intraday_limits(payload: dict = Body(...)):
+    try:
+        return trading_manager.set_intraday_limits(payload or {})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -206,13 +291,27 @@ def get_coin_recent_trades(symbol: str):
     """
     try:
         trades = get_recent_trades(symbol)
+        # If upstream call failed, still return a neutral payload so UI doesn't break
         if "error" in trades:
-            raise HTTPException(status_code=500, detail=trades["error"])
+            logging.warning(f"recent-trades fallback for {symbol}: {trades.get('error')}")
         return trades
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.warning(f"recent-trades failed for {symbol}: {e}")
+        return {
+            "symbol": symbol,
+            "period": "30 seconds",
+            "total_trades": 0,
+            "buy_trades": 0,
+            "sell_trades": 0,
+            "buy_volume": 0,
+            "sell_volume": 0,
+            "buy_percentage": 0,
+            "sell_percentage": 0,
+            "average_trade_size": 0,
+            "trend": "Neutral",
+            "error": str(e),
+            "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
+        }
 
 class AddCoinRequest(BaseModel):
     symbol: str
@@ -220,8 +319,18 @@ class AddCoinRequest(BaseModel):
 class TradeRequest(BaseModel):
     symbol: str
     amount: float
-    client_id: str
-    client_secret: str
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+
+class BinanceCredentialsRequest(BaseModel):
+    api_key: str
+    api_secret: str
+
+class EntryPlanRequest(BaseModel):
+    zone_id: int
+    balance: float = 1000.0
+    risk_perc: float = 1.0
+    rr_target: float = 2.0
 
 @app.post("/api/coin-monitors/add", response_model=dict)
 def add_new_coin(request: AddCoinRequest = Body(...)):
@@ -229,12 +338,10 @@ def add_new_coin(request: AddCoinRequest = Body(...)):
     Endpoint to add a new coin to monitor.
     """
     try:
-        # Fetch current price from Binance API
-        import requests
-        response = requests.get(f'https://api.binance.com/api/v3/ticker/price?symbol={request.symbol}', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        price = float(price_data['price'])
+        # Fetch current price (cache-first helper)
+        price = get_price(request.symbol)
+        if price is None:
+            raise HTTPException(status_code=500, detail="Unable to fetch price for symbol")
 
         # Add the coin
         success = add_coin(request.symbol, price)
@@ -278,38 +385,38 @@ def update_initial_prices_endpoint():
 def buy_coin(request: TradeRequest = Body(...)):
     """
     Endpoint to buy a coin using Binance API.
-    Requires client_id and client_secret for authentication.
+    Requires api_key and api_secret for authentication.
     """
     try:
-        # Get current price from Binance API
-        response = requests.get(f'https://api.binance.com/api/v3/ticker/price?symbol={request.symbol}', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        current_price = float(price_data['price'])
+        if request.api_key and request.api_secret:
+            trading_manager.set_binance_credentials(request.api_key, request.api_secret)
+        api_key = request.api_key or trading_manager.binance_api_key
+        api_secret = request.api_secret or trading_manager.binance_api_secret
+        if not api_key or not api_secret:
+            logging.error("Live BUY attempted without Binance API credentials.")
+            raise HTTPException(status_code=400, detail="Binance API key/secret required")
+
+        current_price = get_price(request.symbol)
+        if current_price is None:
+            raise HTTPException(status_code=500, detail="Unable to fetch price for symbol")
 
         # Calculate quantity based on amount and current price
         quantity = request.amount / current_price
-
-        # In a real implementation, we would use the Binance API to place an order
-        # For now, we'll just simulate a successful order
-
-        # Generate a timestamp for the Binance API
-        timestamp = int(time.time() * 1000)
-
-        # Create a simulated order response
-        order_response = {
-            "symbol": request.symbol,
-            "orderId": f"simulated_{timestamp}",
-            "clientOrderId": f"simulated_{timestamp}",
-            "transactTime": timestamp,
-            "price": str(current_price),
-            "origQty": str(quantity),
-            "executedQty": str(quantity),
-            "status": "FILLED",
-            "timeInForce": "GTC",
-            "type": "MARKET",
-            "side": "BUY"
-        }
+        order_response = trading_manager.place_spot_order(
+            request.symbol,
+            "BUY",
+            amount=request.amount,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        if not order_response:
+            logging.error(f"Live BUY failed for {request.symbol}")
+            raise HTTPException(status_code=500, detail="Binance order failed")
+        fill = trading_manager._extract_order_fill(order_response)
+        if fill["qty"] > 0:
+            quantity = fill["qty"]
+            if fill["price"]:
+                current_price = fill["price"]
 
         return {
             "success": True,
@@ -327,38 +434,38 @@ def buy_coin(request: TradeRequest = Body(...)):
 def sell_coin(request: TradeRequest = Body(...)):
     """
     Endpoint to sell a coin using Binance API.
-    Requires client_id and client_secret for authentication.
+    Requires api_key and api_secret for authentication.
     """
     try:
-        # Get current price from Binance API
-        response = requests.get(f'https://api.binance.com/api/v3/ticker/price?symbol={request.symbol}', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        current_price = float(price_data['price'])
+        if request.api_key and request.api_secret:
+            trading_manager.set_binance_credentials(request.api_key, request.api_secret)
+        api_key = request.api_key or trading_manager.binance_api_key
+        api_secret = request.api_secret or trading_manager.binance_api_secret
+        if not api_key or not api_secret:
+            logging.error("Live SELL attempted without Binance API credentials.")
+            raise HTTPException(status_code=400, detail="Binance API key/secret required")
+
+        current_price = get_price(request.symbol)
+        if current_price is None:
+            raise HTTPException(status_code=500, detail="Unable to fetch price for symbol")
 
         # Calculate quantity based on amount and current price
         quantity = request.amount / current_price
-
-        # In a real implementation, we would use the Binance API to place an order
-        # For now, we'll just simulate a successful order
-
-        # Generate a timestamp for the Binance API
-        timestamp = int(time.time() * 1000)
-
-        # Create a simulated order response
-        order_response = {
-            "symbol": request.symbol,
-            "orderId": f"simulated_{timestamp}",
-            "clientOrderId": f"simulated_{timestamp}",
-            "transactTime": timestamp,
-            "price": str(current_price),
-            "origQty": str(quantity),
-            "executedQty": str(quantity),
-            "status": "FILLED",
-            "timeInForce": "GTC",
-            "type": "MARKET",
-            "side": "SELL"
-        }
+        order_response = trading_manager.place_spot_order(
+            request.symbol,
+            "SELL",
+            quantity=quantity,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        if not order_response:
+            logging.error(f"Live SELL failed for {request.symbol}")
+            raise HTTPException(status_code=500, detail="Binance order failed")
+        fill = trading_manager._extract_order_fill(order_response)
+        if fill["qty"] > 0:
+            quantity = fill["qty"]
+            if fill["price"]:
+                current_price = fill["price"]
 
         return {
             "success": True,
@@ -385,7 +492,7 @@ def api_latest_candles(symbol: str = Query(...), timeframe: str = Query("1m"), l
     """Return recent candles for a symbol/timeframe from the `candles` table."""
     try:
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
+        pg = is_pg(cur)
         # inline validated integer for LIMIT to avoid driver-specific placeholders
         sql = f"SELECT ts, open, high, low, close, volume FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT {int(limit)}"
         cur.execute(_q(sql, pg), (symbol, timeframe))
@@ -401,16 +508,239 @@ def api_latest_candles(symbol: str = Query(...), timeframe: str = Query("1m"), l
         except Exception:
             pass
 
+
+@app.get("/api/ai/patterns/recent", response_model=list)
+def api_recent_patterns(symbol: Optional[str] = Query(None), direction: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=500)):
+    """Return recent incremental/decremental pattern detections."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        base = "SELECT symbol, timeframe, direction, score, pct_change, consistency, volatility, volume_z, detected_at, features_json FROM pattern_events"
+        clauses = []
+        params = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if direction:
+            clauses.append("direction = ?")
+            params.append(direction)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"{base}{where} ORDER BY detected_at DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg), params)
+        cols = ["symbol", "timeframe", "direction", "score", "pct_change", "consistency", "volatility", "volume_z", "detected_at", "features_json"]
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            item = dict(zip(cols, r))
+            try:
+                item["features"] = json.loads(item.pop("features_json") or "{}")
+            except Exception:
+                item["features"] = {}
+            out.append(item)
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/ai/regime/latest", response_model=list)
+def api_regime_latest(symbol: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500)):
+    """Return latest regime labels for symbols."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        base = "SELECT symbol, timeframe, ts, regime, confidence, model_version, curve_location, trend FROM regime_states"
+        clauses = []
+        params = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"{base}{where} ORDER BY ts DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg), params)
+        cols = ["symbol", "timeframe", "ts", "regime", "confidence", "model_version", "curve_location", "trend"]
+        rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/ai/decisions/recent", response_model=list)
+def api_ai_decisions(symbol: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500)):
+    """Recent AI ensemble decisions with risk flags."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        base = "SELECT symbol, timeframe, intention, confidence, expected_return, regime, pattern_score, risk_blocked, created_at FROM ai_decisions"
+        clauses = []
+        params = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"{base}{where} ORDER BY created_at DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg), params)
+        cols = ["symbol","timeframe","intention","confidence","expected_return","regime","pattern_score","risk_blocked","created_at"]
+        rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/ai/backtests", response_model=list)
+def api_ai_backtests(limit: int = Query(50, ge=1, le=200)):
+    """Recent backtest runs for AI models."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        sql = f"SELECT id, model_name, started_at, completed_at, samples, sharpe, win_rate, avg_return, notes FROM backtest_runs ORDER BY id DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg))
+        cols = ["id","model_name","started_at","completed_at","samples","sharpe","win_rate","avg_return","notes"]
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            item = dict(zip(cols, r))
+            out.append(item)
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/zones/refresh", response_model=dict)
+def api_zones_refresh(timeframe: str = Query("1m")):
+    """Run a lightweight zone detection for all tracked symbols and persist to zones table."""
+    try:
+        conn, cur = get_database_connection()
+        cur.execute("SELECT symbol FROM coin_monitor")
+        syms = [r[0] for r in cur.fetchall()]
+        cur.close(); conn.close()
+        count = run_zone_detection(syms, timeframe=timeframe)
+        return {"inserted": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/zones", response_model=list)
+def api_zones(symbol: Optional[str] = Query(None), timeframe: Optional[str] = Query(None), limit: int = Query(200, ge=1, le=1000)):
+    """List zones with optional filters."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        base = (
+            "SELECT id, symbol, timeframe, zone_type, formation, proximal, distal, "
+            "base_start_ts, base_end_ts, leg_in_ts, leg_out_ts, quality_basic, "
+            "quality_adv, quality_label, probability_label, rr_est, curve_location, "
+            "trend, freshness, tests, opposing_dist, opposing_zone_id, confluence, lotl, trap, created_at, last_tested_at FROM zones"
+        )
+        clauses = []
+        params = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if timeframe:
+            clauses.append("timeframe = ?")
+            params.append(timeframe)
+        where_clause = ""
+        if clauses:
+            where_clause = " WHERE " + " AND ".join(clauses)
+
+        sql = f"{base}{where_clause} ORDER BY created_at DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg), params)
+        cols = ["id","symbol","timeframe","zone_type","formation","proximal","distal","base_start_ts","base_end_ts","leg_in_ts","leg_out_ts","quality_basic","quality_adv","quality_label","probability_label","rr_est","curve_location","trend","freshness","tests","opposing_dist","opposing_zone_id","confluence","lotl","trap","created_at","last_tested_at"]
+        rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/trading/plan", response_model=dict)
+def api_trading_plan(request: EntryPlanRequest = Body(...)):
+    """Suggest an entry/stop/tp and size for a given zone."""
+    zone = get_zone_by_id(request.zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    try:
+        plan = plan_entry_for_zone(zone, balance=request.balance, risk_perc=request.risk_perc, rr_target=request.rr_target)
+        plan_id = persist_entry_plan(plan)
+        if plan_id:
+            plan["entry_plan_id"] = plan_id
+        return plan
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/entry-plans", response_model=list)
+def api_entry_plans(symbol: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=1000)):
+    """List entry plans (most recent first)."""
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        base = "SELECT id, zone_id, symbol, timeframe, entry_type, entry_price, stop_price, take_profit_price, rr_target, risk_perc, balance, position_size, risk_amount, atr_used, buffer_used, status, created_at FROM entry_plans"
+        params = []
+        where = ""
+        if symbol:
+            where = " WHERE symbol = ?"
+            params.append(symbol)
+        sql = f"{base}{where} ORDER BY id DESC LIMIT {int(limit)}"
+        cur.execute(_q(sql, pg), params)
+        cols = ["id","zone_id","symbol","timeframe","entry_type","entry_price","stop_price","take_profit_price","rr_target","risk_perc","balance","position_size","risk_amount","atr_used","buffer_used","status","created_at"]
+        rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
 @app.get("/api/market/features/latest", response_model=list)
 def api_latest_features(symbol: str = Query(...), timeframe: str = Query("1m"), limit: int = Query(100, ge=1, le=1000)):
     """Return recent computed features for a symbol/timeframe from the `features` table."""
     try:
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
-        sql = f"SELECT ts, ema7, ema25, ema_slope, ret_1, ret_5, ret_15 FROM features WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT {int(limit)}"
+        pg = is_pg(cur)
+        sql = f"""
+            SELECT ts, ema7, ema25, ema_slope,
+                   ret_1, ret_5, ret_15,
+                   ret_z1, ret_z5, ret_z15,
+                   volatility, vol_z, rsi, macd, macd_signal, macd_hist,
+                   boll_width, atr, body_pct, is_boring
+            FROM features
+            WHERE symbol = ? AND timeframe = ?
+            ORDER BY ts DESC LIMIT {int(limit)}
+        """
         cur.execute(_q(sql, pg), (symbol, timeframe))
         rows = cur.fetchall()
-        cols = ["ts","ema7","ema25","ema_slope","ret_1","ret_5","ret_15"]
+        cols = ["ts","ema7","ema25","ema_slope",
+                "ret_1","ret_5","ret_15",
+                "ret_z1","ret_z5","ret_z15",
+                "volatility","vol_z","rsi","macd","macd_signal","macd_hist",
+                "boll_width","atr","body_pct","is_boring"]
         data = [dict(zip(cols, r)) for r in rows]
         return data
     except Exception as e:
@@ -426,7 +756,7 @@ def api_patterns(limit: int = Query(200, ge=1, le=1000)):
     """List discovered pattern clusters (placeholder until discovery job populates)."""
     try:
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
+        pg = is_pg(cur)
         sql = f"SELECT id, symbol, timeframe, algo, centroid_json, cluster_size, avg_return, volatility, label, created_at FROM pattern_clusters ORDER BY id DESC LIMIT {int(limit)}"
         cur.execute(_q(sql, pg))
         rows = cur.fetchall()
@@ -445,7 +775,7 @@ def api_patterns_active(symbol: str = Query(...), timeframe: str = Query("1m")):
     """Return the latest assignment for a symbol/timeframe, if any (placeholder)."""
     try:
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
+        pg = is_pg(cur)
         # Choose the row with the latest end_ts or start_ts if end_ts is NULL
         sql = """
             SELECT pattern_id, symbol, timeframe, start_ts, end_ts, features_json, performance
@@ -482,13 +812,13 @@ def api_regime_current(symbol: str = Query(...), timeframe: str = Query("1m")):
     """Return latest regime state row for symbol/timeframe (placeholder until classifier runs)."""
     try:
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
-        sql = "SELECT ts, regime, confidence, model_version FROM regime_states WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 1"
+        pg = is_pg(cur)
+        sql = "SELECT ts, regime, confidence, model_version, curve_location, trend FROM regime_states WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 1"
         cur.execute(_q(sql, pg), (symbol, timeframe))
         row = cur.fetchone()
         if not row:
             return {}
-        cols = ["ts","regime","confidence","model_version"]
+        cols = ["ts","regime","confidence","model_version","curve_location","trend"]
         return dict(zip(cols, row))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -511,7 +841,138 @@ def api_predictions(timeframe: str = Query("1m"), limit: int = Query(100, ge=1, 
     try:
         lim = int(limit)
         conn, cur = get_database_connection()
-        pg = _is_postgres(cur)
+        pg = is_pg(cur)
+        # 1) Get list of symbols we know about
+        cur.execute(_q("SELECT symbol FROM coin_monitor", pg))
+        syms = [r[0] for r in cur.fetchall()]
+        results = []
+        for sym in syms:
+            # Latest assignment for this symbol/timeframe
+            sql_ass = _q(
+                """
+                SELECT pattern_id, start_ts, end_ts, performance
+                FROM pattern_assignments
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY end_ts DESC LIMIT 1
+                """,
+                pg,
+            )
+            cur.execute(sql_ass, (sym, timeframe))
+            row = cur.fetchone()
+            if not row:
+                continue
+            pattern_id, start_ts, end_ts, perf = row
+            # Cluster metrics
+            cur.execute(_q("SELECT avg_return, volatility, cluster_size, label FROM pattern_clusters WHERE id = ?", pg), (pattern_id,))
+            cl = cur.fetchone()
+            if not cl:
+                continue
+            avg_ret, vol, size, label = cl
+            # Latest regime for context
+            cur.execute(
+                _q("SELECT regime FROM regime_states WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 1", pg),
+                (sym, timeframe),
+            )
+            row_reg = cur.fetchone()
+            regime = row_reg[0] if row_reg else None
+            # heuristic score
+            score = (avg_ret or 0.0) - (vol or 0.0) * 0.5 + (size or 0) * 0.001
+            results.append(
+                {
+                    "symbol": sym,
+                    "timeframe": timeframe,
+                    "pattern_id": pattern_id,
+                    "avg_return": avg_ret,
+                    "volatility": vol,
+                    "cluster_size": size,
+                    "win_rate": perf,
+                    "regime": regime,
+                    "score_pct": round(score * 100, 2) if score is not None else None,
+                    "label": label,
+                }
+            )
+        # sort and trim
+        results = sorted(results, key=lambda x: x.get("score_pct") or 0, reverse=True)[:lim]
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+@app.get("/api/logs/recent", response_model=list)
+def api_logs_recent(lines: int = Query(200, ge=1, le=1000), filter_text: Optional[str] = Query(None)):
+    """
+    Return tail of api.log. Optional filter_text performs simple substring filter.
+    """
+    log_path = pathlib.Path("api.log")
+    if not log_path.exists():
+        return []
+    try:
+        data = log_path.read_text(errors="ignore").splitlines()
+        tail = data[-int(lines):]
+        if filter_text:
+            tail = [ln for ln in tail if filter_text.lower() in ln.lower()]
+        return tail
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/health/summary", response_model=dict)
+def api_health_summary():
+    """
+    Lightweight status/metrics for UI monitoring.
+    """
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        # counts
+        cur.execute("SELECT COUNT(1) FROM trade_logs")
+        trades = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(1) FROM zones")
+        zones = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(1) FROM entry_plans")
+        plans = int(cur.fetchone()[0] or 0)
+        # latest candle ts
+        cur.execute("SELECT symbol, MAX(ts) FROM candles GROUP BY symbol")
+        latest = {row[0]: int(row[1]) for row in cur.fetchall()}
+        status = {
+            "trading_enabled": trading_manager.enabled,
+            "strategy_mode": trading_manager.strategy_mode,
+            "coin_brain_symbol": trading_manager.coin_brain_symbol,
+            "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True),
+            "trade_logs": trades,
+            "zones": zones,
+            "entry_plans": plans,
+            "latest_candles": latest,
+        }
+        return status
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/trading/hybrid", response_model=dict)
+def api_trading_hybrid(payload: dict = Body(...)):
+    """Enable/disable the hybrid multi-symbol loop."""
+    enabled = payload.get("enabled")
+    if enabled is None:
+        raise HTTPException(status_code=400, detail="enabled is required")
+    try:
+        trading_manager.set_hybrid_enabled(bool(enabled))
+        return {"hybrid_enabled": trading_manager.hybrid_enabled}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    try:
+        lim = int(limit)
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
         # 1) Get list of symbols we know about
         cur.execute("SELECT symbol FROM coin_monitor")
         syms = [r[0] for r in cur.fetchall()]

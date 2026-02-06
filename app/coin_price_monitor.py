@@ -4,7 +4,8 @@ import time
 import threading
 import requests
 import sqlite3
-from .coin_monitor import update_price_history
+from .db_schema import ensure_coin_monitor, ensure_price_history, ensure_all_schema, is_pg
+from typing import Dict, Optional
 
 # Import PostgreSQL libraries if available
 try:
@@ -13,6 +14,40 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
+
+# Simple price cache to avoid hammering Binance for point lookups
+class PriceCache:
+    def __init__(self, interval_sec: int = 10):
+        self.interval_sec = interval_sec
+        self._stop = threading.Event()
+        self._thread = None
+        self._prices: Dict[str, float] = {}
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                data = fetch_all_prices()
+                if data:
+                    self._prices = data
+            except Exception as e:
+                logging.warning(f"PriceCache fetch failed: {e}")
+            time.sleep(self.interval_sec)
+
+    def get(self, symbol: str) -> float:
+        return self._prices.get(symbol)
+
+# Global cache instance
+price_cache = PriceCache(interval_sec=int(os.getenv("PRICE_CACHE_SEC", "10")))
 
 # Configure logging
 logging.basicConfig(
@@ -23,6 +58,10 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+def _q(sql: str, pg: bool) -> str:
+    """Swap placeholders for PostgreSQL when needed."""
+    return sql.replace('?', '%s') if pg else sql
 
 def get_database_connection():
     """Create and return a database connection (PostgreSQL or SQLite)."""
@@ -39,7 +78,12 @@ def get_database_connection():
                     port=os.getenv('DB_PORT', '5432'),
                     database=os.getenv('DB_NAME', 'coin_monitor'),
                 )
+                # Use autocommit to avoid lingering aborted transactions when optional ALTERs fail
+                connection.autocommit = True
                 cursor = connection.cursor()
+                # Ensure core tables
+                ensure_all_schema(cursor, pg=True)
+                ensure_price_history(cursor, pg=True)
                 logging.info("Successfully connected to the PostgreSQL database.")
                 return connection, cursor
             except Exception as e:
@@ -52,39 +96,8 @@ def get_database_connection():
         connection = sqlite3.connect(db_path)
         cursor = connection.cursor()
 
-        # Create the coin_monitor table if it doesn't exist
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS coin_monitor (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL UNIQUE,
-                initial_price REAL NOT NULL,
-                low_price REAL NOT NULL,
-                high_price REAL NOT NULL,
-                latest_price REAL NOT NULL,
-                low_price_1 REAL DEFAULT 0.0,
-                high_price_1 REAL DEFAULT 0.0,
-                low_price_2 REAL DEFAULT 0.0,
-                high_price_2 REAL DEFAULT 0.0,
-                low_price_3 REAL DEFAULT 0.0,
-                high_price_3 REAL DEFAULT 0.0,
-                low_price_4 REAL DEFAULT 0.0,
-                high_price_4 REAL DEFAULT 0.0,
-                low_price_5 REAL DEFAULT 0.0,
-                high_price_5 REAL DEFAULT 0.0,
-                low_price_6 REAL DEFAULT 0.0,
-                high_price_6 REAL DEFAULT 0.0,
-                low_price_7 REAL DEFAULT 0.0,
-                high_price_7 REAL DEFAULT 0.0,
-                low_price_8 REAL DEFAULT 0.0,
-                high_price_8 REAL DEFAULT 0.0,
-                low_price_9 REAL DEFAULT 0.0,
-                high_price_9 REAL DEFAULT 0.0,
-                low_price_10 REAL DEFAULT 0.0,
-                high_price_10 REAL DEFAULT 0.0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        ensure_all_schema(cursor, pg=False)
+        ensure_price_history(cursor, pg=False)
         connection.commit()
         logging.info("Successfully connected to the SQLite database.")
         return connection, cursor
@@ -94,10 +107,123 @@ def get_database_connection():
             connection.close()
         raise
 
+def seed_coin_monitor_if_empty(limit: int = 60) -> int:
+    """
+    If the coin_monitor table is empty, seed it with top USDT symbols by 24h volume.
+    This prevents empty ingestors/pattern engines right after startup.
+    Returns the number of rows inserted.
+    """
+    try:
+        limit = int(os.getenv("SEED_COINS_LIMIT", str(limit)))
+    except Exception:
+        pass
+    inserted = 0
+    conn = None
+    cur = None
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        cur.execute("SELECT COUNT(1) FROM coin_monitor")
+        count = cur.fetchone()[0] or 0
+        # If table already has more than the limit, trim to reduce load (keep lowest id first)
+        if count > limit:
+            try:
+                cur.execute(_q("SELECT id FROM coin_monitor ORDER BY id ASC LIMIT ?", pg), (limit,))
+                keep_ids = [r[0] for r in cur.fetchall()]
+                if keep_ids:
+                    placeholders = ",".join(["?"] * len(keep_ids))
+                    sql = f"DELETE FROM coin_monitor WHERE id NOT IN ({placeholders})"
+                    cur.execute(_q(sql, pg), keep_ids)
+                    conn.commit()
+                    logging.info(f"Trimmed coin_monitor to {limit} rows for testing load")
+            except Exception as e:
+                logging.warning(f"Unable to trim coin_monitor: {e}")
+        if count:
+            return int(min(count, limit))
+
+        resp = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
+        resp.raise_for_status()
+        tickers = resp.json()
+        usdt = [t for t in tickers if isinstance(t.get("symbol"), str) and t["symbol"].endswith("USDT")]
+
+        def vol(t):
+            try:
+                return float(t.get("quoteVolume") or 0.0)
+            except Exception:
+                return 0.0
+
+        top = sorted(usdt, key=vol, reverse=True)[:limit]
+        sql = _q(
+            "INSERT INTO coin_monitor(symbol, initial_price, low_price, high_price, latest_price) VALUES (?, ?, ?, ?, ?)",
+            pg,
+        )
+        for t in top:
+            price = float(t.get("lastPrice") or t.get("price") or 0.0)
+            if price <= 0:
+                continue
+            symbol = t["symbol"]
+            try:
+                cur.execute(sql, (symbol, price, price, price, price))
+                inserted += 1
+            except Exception:
+                # ignore duplicates just in case of race
+                pass
+        conn.commit()
+        logging.info(f"Seeded {inserted} symbols into coin_monitor (top USDT by volume)")
+        return inserted
+    except Exception as e:
+        logging.warning(f"Seeding coin_monitor failed: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return inserted
+    finally:
+        try:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+def fetch_all_prices() -> Dict[str, float]:
+    """Fetch latest prices for all symbols from Binance."""
+    resp = requests.get('https://api.binance.com/api/v3/ticker/price', timeout=10)
+    resp.raise_for_status()
+    price_data = resp.json()
+    return {item['symbol']: float(item['price']) for item in price_data}
+
+def get_cached_price(symbol: str) -> float:
+    """Return cached price if available, else None."""
+    return price_cache.get(symbol)
+
+def fetch_symbol_price(symbol: str, use_cache: bool = True) -> Optional[float]:
+    """Get a single symbol price, preferring cache, otherwise hitting Binance."""
+    if use_cache:
+        val = price_cache.get(symbol)
+        if val is not None:
+            return val
+    try:
+        resp = requests.get(f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}', timeout=10)
+        resp.raise_for_status()
+        return float(resp.json()['price'])
+    except Exception as e:
+        logging.warning(f"Failed to fetch price for {symbol}: {e}")
+        return None
+
+
+def get_price(symbol: str) -> Optional[float]:
+    """Public helper to get price via cache-first lookup."""
+    return fetch_symbol_price(symbol, use_cache=True)
+
 def get_all_coins():
     """Get all coins from the coin_monitor table."""
     try:
         connection, cursor = get_database_connection()
+        pg = is_pg(cursor)
+        pg = is_pg(cursor)
         query = """
             SELECT symbol FROM coin_monitor
         """
@@ -120,12 +246,10 @@ def add_coin(symbol, price):
     """
     try:
         connection, cursor = get_database_connection()
+        pg = is_pg(cursor)
 
         # Check if the coin already exists
-        if isinstance(connection, psycopg2.extensions.connection):
-            cursor.execute("SELECT COUNT(*) FROM coin_monitor WHERE symbol = %s", (symbol,))
-        else:
-            cursor.execute("SELECT COUNT(*) FROM coin_monitor WHERE symbol = ?", (symbol,))
+        cursor.execute(_q("SELECT COUNT(*) FROM coin_monitor WHERE symbol = ?", pg), (symbol,))
         if cursor.fetchone()[0] > 0:
             logging.info(f"Coin {symbol} already exists in coin_monitor table.")
             return False
@@ -135,19 +259,14 @@ def add_coin(symbol, price):
         low_price = price * 0.98  # 2% lower
         high_price = price * 1.02  # 2% higher
 
-        # Insert the new coin
-        if isinstance(connection, psycopg2.extensions.connection):
-            insert_query = """
-                INSERT INTO coin_monitor 
-                (symbol, initial_price, low_price, high_price, latest_price)
-                VALUES (%s, %s, %s, %s, %s)
+        insert_query = _q(
             """
-        else:
-            insert_query = """
                 INSERT INTO coin_monitor 
                 (symbol, initial_price, low_price, high_price, latest_price)
                 VALUES (?, ?, ?, ?, ?)
-            """
+            """,
+            pg,
+        )
         cursor.execute(insert_query, (symbol, price, low_price, high_price, price))
         connection.commit()
         logging.info(f"Added new coin {symbol} to coin_monitor table.")
@@ -193,19 +312,15 @@ def initialize_price_history(symbol, current_price):
         high_price = current_price * high_factor
         low_price = current_price * low_factor
 
-        # Build the update query based on connection type
-        if isinstance(connection, psycopg2.extensions.connection):
-            update_query = """
-                UPDATE coin_monitor
-                SET high_price_1 = %s, low_price_1 = %s
-                WHERE symbol = %s
+        pg = is_pg(cursor)
+        update_query = _q(
             """
-        else:
-            update_query = """
                 UPDATE coin_monitor
                 SET high_price_1 = ?, low_price_1 = ?
                 WHERE symbol = ?
-            """
+            """,
+            pg,
+        )
 
         # Execute the update
         cursor.execute(update_query, (high_price, low_price, symbol))
@@ -230,21 +345,22 @@ def initialize_coin_monitor(symbols=None):
     """
     connection = None
     try:
-        # Fetch current prices from Binance API
-        response = requests.get('https://api.binance.com/api/v3/ticker/price', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        price_dict = {item['symbol']: float(item['price']) for item in price_data}
+        # Fetch current prices (use cache if populated)
+        price_dict = getattr(price_cache, "_prices", {}) or {}
+        if not price_dict:
+            price_dict = fetch_all_prices()
+            price_cache._prices = price_dict
 
         # If no symbols provided, get all USDT pairs from Binance
         if not symbols:
-            symbols = [item['symbol'] for item in price_data if item['symbol'].endswith('USDT')]
+            symbols = [s for s in price_dict.keys() if s.endswith('USDT')]
             logging.info(f"No symbols provided, using all USDT pairs from Binance: {len(symbols)} pairs found")
 
         connection, cursor = get_database_connection()
+        pg = is_pg(cursor)
 
         # Check which symbols are already in the coin_monitor table
-        cursor.execute("SELECT symbol FROM coin_monitor")
+        cursor.execute(_q("SELECT symbol FROM coin_monitor", pg))
         existing_symbols = [row[0] for row in cursor.fetchall()]
 
         # Filter out symbols that are already in the table
@@ -275,18 +391,14 @@ def initialize_coin_monitor(symbols=None):
 
         # Insert new records
         if insert_data:
-            if isinstance(connection, psycopg2.extensions.connection):
-                insert_query = """
-                    INSERT INTO coin_monitor 
-                    (symbol, initial_price, low_price, high_price, latest_price)
-                    VALUES (%s, %s, %s, %s, %s)
+            insert_query = _q(
                 """
-            else:
-                insert_query = """
                     INSERT INTO coin_monitor 
                     (symbol, initial_price, low_price, high_price, latest_price)
                     VALUES (?, ?, ?, ?, ?)
-                """
+                """,
+                pg,
+            )
 
             # Do individual inserts
             for data in insert_data:
@@ -463,11 +575,14 @@ def update_coin_prices():
     """Update the latest prices for all coins in the coin_monitor table."""
     connection = None
     try:
-        # Fetch current prices from Binance API
-        response = requests.get('https://api.binance.com/api/v3/ticker/price', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        price_dict = {item['symbol']: float(item['price']) for item in price_data}
+        # Fetch current prices from cache first, otherwise hit Binance once
+        price_dict = getattr(price_cache, "_prices", {}) or {}
+        if not price_dict:
+            price_dict = fetch_all_prices()
+            price_cache._prices = price_dict
+
+        # Lazy import to avoid circular dependency
+        from .coin_monitor import update_price_history
 
         connection, cursor = get_database_connection()
 
@@ -717,11 +832,11 @@ def update_initial_prices():
         int: Number of coins updated
     """
     try:
-        # Fetch current prices from Binance API
-        response = requests.get('https://api.binance.com/api/v3/ticker/price', timeout=10)
-        response.raise_for_status()
-        price_data = response.json()
-        price_dict = {item['symbol']: float(item['price']) for item in price_data}
+        # Fetch current prices (prefer cache, else live)
+        price_dict = getattr(price_cache, "_prices", {}) or {}
+        if not price_dict:
+            price_dict = fetch_all_prices()
+            price_cache._prices = price_dict
 
         connection, cursor = get_database_connection()
 
@@ -794,6 +909,10 @@ def run_price_monitor():
 # Function to start the price monitor in a separate thread
 def start_price_monitor():
     """Start the price monitor in a separate thread."""
+    try:
+        price_cache.start()
+    except Exception as e:
+        logging.warning(f"Price cache failed to start: {e}")
     monitor_thread = threading.Thread(target=run_price_monitor, daemon=True)
     monitor_thread.start()
     logging.info("Started price monitor thread")
