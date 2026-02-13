@@ -6,12 +6,14 @@ const API_URL = process.env.REACT_APP_API_URL || '';
 export default function MonitorPanel() {
   const [lines, setLines] = useState([]);
   const [filter, setFilter] = useState('');
+  const [logView, setLogView] = useState('errors'); // all | errors | warnings
   const [health, setHealth] = useState({});
   const [tab, setTab] = useState('api'); // future: api|ingestor|pattern
 
   const loadLogs = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/logs/recent?lines=200${filter ? `&filter_text=${encodeURIComponent(filter)}` : ''}`);
+      const effectiveFilter = filter || (logView === 'errors' ? 'ERROR' : logView === 'warnings' ? 'WARNING' : '');
+      const res = await fetch(`${API_URL}/api/logs/recent?lines=200${effectiveFilter ? `&filter_text=${encodeURIComponent(effectiveFilter)}` : ''}`);
       const json = await res.json();
       setLines(Array.isArray(json) ? json : []);
     } catch (e) {
@@ -35,7 +37,7 @@ export default function MonitorPanel() {
     const id = setInterval(loadLogs, 5000);
     const id2 = setInterval(loadHealth, 5000);
     return () => { clearInterval(id); clearInterval(id2); };
-  }, [filter]);
+  }, [filter, logView]);
 
   return (
     <div style={{ display: 'grid', gap: 16, width: '100%', gridTemplateColumns: '1fr 1fr' }}>
@@ -60,6 +62,11 @@ export default function MonitorPanel() {
           <div style={{ display: 'flex', gap: 8 }}>
             <select className="overlay-select" value={tab} onChange={(e) => setTab(e.target.value)}>
               <option value="api">API</option>
+            </select>
+            <select className="overlay-select" value={logView} onChange={(e) => setLogView(e.target.value)}>
+              <option value="errors">Errors</option>
+              <option value="warnings">Warnings</option>
+              <option value="all">All</option>
             </select>
             <input
               className="overlay-input"

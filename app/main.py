@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Body, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from pydantic import BaseModel
@@ -25,6 +25,7 @@ from .coin_price_monitor import start_price_monitor, add_coin, force_update_all_
 from .trading import trading_manager
 from .ai_pipeline import start_ai_background_jobs, is_pg, _q, pattern_discovery
 from .zone_engine import run_zone_detection, get_zone_by_id, plan_entry_for_zone, persist_entry_plan
+from .db_schema import ensure_orderbook
 import pathlib
 
 # Configure logging
@@ -36,6 +37,23 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+# Uvicorn may configure logging before this module loads, which can prevent
+# basicConfig from adding file handlers. Ensure api.log is always used.
+_root_logger = logging.getLogger()
+_log_path = pathlib.Path("api.log")
+try:
+    _log_path.touch(exist_ok=True)
+except Exception:
+    pass
+_has_file = any(
+    isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(_log_path.resolve())
+    for h in _root_logger.handlers
+)
+if not _has_file:
+    _fh = logging.FileHandler(str(_log_path))
+    _fh.setLevel(logging.INFO)
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    _root_logger.addHandler(_fh)
 
 # Create FastAPI app
 app = FastAPI(title="Trishul Watch API", description="API for monitoring cryptocurrency prices with AI Patterns")
@@ -140,6 +158,10 @@ def trading_reset():
         return {"ok": True, "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class BinanceCredentialsRequest(BaseModel):
+    api_key: str
+    api_secret: str
 
 @app.post("/api/trading/credentials", response_model=dict)
 def trading_credentials(payload: BinanceCredentialsRequest = Body(...)):
@@ -313,6 +335,66 @@ def get_coin_recent_trades(symbol: str):
             "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
         }
 
+
+@app.get("/api/trade-activity", response_model=list)
+def api_trade_activity(limit: int = Query(50, ge=1, le=200), max_age_sec: int = Query(120, ge=10, le=600)):
+    """
+    Return a ranked list of symbols by latest 1m trade counts from orderflow.
+    """
+    conn = None
+    cur = None
+    try:
+        conn, cur = get_database_connection()
+        pg = is_pg(cur)
+        ensure_orderbook(cur, pg)
+        now_ms = int(time.time() * 1000)
+        min_ts = now_ms - (max_age_sec * 1000)
+        sql = _q(
+            """
+            SELECT o.symbol, o.buy_count, o.sell_count, o.buy_volume, o.sell_volume, o.ts
+            FROM orderflow o
+            JOIN (
+                SELECT symbol, MAX(ts) AS max_ts
+                FROM orderflow
+                GROUP BY symbol
+            ) latest
+              ON o.symbol = latest.symbol AND o.ts = latest.max_ts
+            WHERE o.ts >= ?
+            ORDER BY (o.buy_count + o.sell_count) DESC
+            LIMIT ?
+            """,
+            pg,
+        )
+        cur.execute(sql, (min_ts, limit))
+        rows = cur.fetchall()
+        results = []
+        for r in rows:
+            symbol, buy_count, sell_count, buy_volume, sell_volume, ts = r
+            total = int(buy_count or 0) + int(sell_count or 0)
+            results.append(
+                {
+                    "symbol": symbol,
+                    "total_trades": total,
+                    "buy_count": int(buy_count or 0),
+                    "sell_count": int(sell_count or 0),
+                    "buy_volume": float(buy_volume or 0),
+                    "sell_volume": float(sell_volume or 0),
+                    "ts": int(ts or 0),
+                }
+            )
+        return results
+    except Exception as e:
+        logging.error(f"trade-activity failed: {e}")
+        return []
+    finally:
+        try:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
 class AddCoinRequest(BaseModel):
     symbol: str
 
@@ -321,10 +403,6 @@ class TradeRequest(BaseModel):
     amount: float
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
-
-class BinanceCredentialsRequest(BaseModel):
-    api_key: str
-    api_secret: str
 
 class EntryPlanRequest(BaseModel):
     zone_id: int

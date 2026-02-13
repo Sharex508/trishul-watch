@@ -63,6 +63,14 @@ def _q(sql: str, pg: bool) -> str:
     """Swap placeholders for PostgreSQL when needed."""
     return sql.replace('?', '%s') if pg else sql
 
+_DB_LOGGED = False
+
+def _log_db_once(message: str):
+    global _DB_LOGGED
+    if not _DB_LOGGED:
+        logging.info(message)
+        _DB_LOGGED = True
+
 def get_database_connection():
     """Create and return a database connection (PostgreSQL or SQLite)."""
     connection = None
@@ -84,7 +92,7 @@ def get_database_connection():
                 # Ensure core tables
                 ensure_all_schema(cursor, pg=True)
                 ensure_price_history(cursor, pg=True)
-                logging.info("Successfully connected to the PostgreSQL database.")
+                _log_db_once("Successfully connected to the PostgreSQL database.")
                 return connection, cursor
             except Exception as e:
                 logging.error(f"Error connecting to PostgreSQL database: {e}")
@@ -99,7 +107,7 @@ def get_database_connection():
         ensure_all_schema(cursor, pg=False)
         ensure_price_history(cursor, pg=False)
         connection.commit()
-        logging.info("Successfully connected to the SQLite database.")
+        _log_db_once("Successfully connected to the SQLite database.")
         return connection, cursor
     except Exception as e:
         logging.error(f"Error connecting to database: {e}")

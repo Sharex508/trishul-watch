@@ -5,10 +5,9 @@ import CoinList from './components/CoinList';
 import CoinDetail from './components/CoinDetail';
 import AdminPanel from './components/AdminPanel';
 import TradingPanel from './components/TradingPanel';
-import PatternsPanel from './components/PatternsPanel';
 import PredictionsPanel from './components/PredictionsPanel';
-import ZoneOverlayPanel from './components/ZoneOverlayPanel';
 import MonitorPanel from './components/MonitorPanel';
+import TradeActivityPanel from './components/TradeActivityPanel';
 
 // Get API URL from environment variable or use default
 const API_URL = process.env.REACT_APP_API_URL || '';
@@ -19,7 +18,7 @@ function App() {
   const [error, setError] = useState(null);
   const [selectedCoin, setSelectedCoin] = useState(null);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [tab, setTab] = useState('monitor'); // 'monitor' | 'trading' | 'patterns' | 'predictions' | 'zones' | 'monitoring'
+  const [tab, setTab] = useState('monitor'); // 'monitor' | 'trading' | 'activity' | 'predictions' | 'monitoring'
 
   useEffect(() => {
     const fetchCoins = async () => {
@@ -75,10 +74,9 @@ function App() {
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button className={`admin-button ${tab==='monitor'?'active':''}`} onClick={() => setTab('monitor')}>Monitor</button>
           <button className={`admin-button ${tab==='trading'?'active':''}`} onClick={() => setTab('trading')}>Trading</button>
-          <button className={`admin-button ${tab==='patterns'?'active':''}`} onClick={() => setTab('patterns')}>Patterns</button>
+          <button className={`admin-button ${tab==='activity'?'active':''}`} onClick={() => setTab('activity')}>Trade Activity</button>
           <button className={`admin-button ${tab==='predictions'?'active':''}`} onClick={() => setTab('predictions')}>Predictions</button>
-          <button className={`admin-button ${tab==='zones'?'active':''}`} onClick={() => setTab('zones')}>Zones</button>
-          <button className={`admin-button ${tab==='monitoring'?'active':''}`} onClick={() => setTab('monitoring')}>Monitor</button>
+          <button className={`admin-button ${tab==='monitoring'?'active':''}`} onClick={() => setTab('monitoring')}>Error Logs</button>
           <button 
             className="admin-button"
             onClick={() => setShowAdminPanel(!showAdminPanel)}
@@ -108,14 +106,11 @@ function App() {
         {tab === 'trading' && (
           <div className="content"><TradingPanel selectedSymbol={selectedCoin?.symbol} /></div>
         )}
-        {tab === 'patterns' && (
-          <div className="content"><PatternsPanel /></div>
+        {tab === 'activity' && (
+          <TradeActivityPanel />
         )}
         {tab === 'predictions' && (
           <div className="content"><PredictionsPanel /></div>
-        )}
-        {tab === 'zones' && (
-          <div className="content"><ZoneOverlayPanel coins={coins} selectedSymbol={selectedCoin?.symbol} /></div>
         )}
         {tab === 'monitoring' && (
           <div className="content"><MonitorPanel /></div>

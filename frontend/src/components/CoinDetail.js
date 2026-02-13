@@ -43,12 +43,12 @@ const CoinDetail = ({ symbol, onBack }) => {
       fetchData();
     }
 
-    // Set up polling to refresh data every 20 seconds
+    // Set up polling to refresh data every 3 seconds
     const interval = setInterval(() => {
       if (symbol) {
         fetchData();
       }
-    }, 20000);
+    }, 3000);
 
     // Clean up interval on component unmount or when symbol changes
     return () => clearInterval(interval);

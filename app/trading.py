@@ -5,6 +5,7 @@ import os
 import hmac
 import hashlib
 import urllib.parse
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional, List, Dict
 
 import requests
@@ -106,6 +107,8 @@ class TradingManager:
             "pullback_range_mult": float(os.getenv("INTRADAY_PULLBACK_RANGE_MULT", "0.4")),
             "bounce_pct": float(os.getenv("INTRADAY_BOUNCE_PCT", "0.5")),
             "bounce_lookback": int(os.getenv("INTRADAY_BOUNCE_LOOKBACK", "5")),
+            "trades_filter_enabled": 1 if os.getenv("INTRADAY_TRADES_FILTER_ENABLED", "true").lower() == "true" else 0,
+            "min_trades_1m": int(os.getenv("INTRADAY_MIN_TRADES_1M", "50")),
         }
         self.intraday_sync_limits = os.getenv("INTRADAY_SYNC_LIMITS", "true").lower() == "true"
         self.intraday_reset_on_start = os.getenv("INTRADAY_RESET_ON_START", "true").lower() == "true"
@@ -114,12 +117,17 @@ class TradingManager:
         self.intraday_volume_min_mult = float(os.getenv("INTRADAY_VOL_MIN_MULT", "0.8"))
         self.intraday_pump_5m_pct = float(os.getenv("INTRADAY_PUMP_5M_PCT", "1.5"))
         self.intraday_pump_30m_pct = float(os.getenv("INTRADAY_PUMP_30M_PCT", "3.0"))
+        self.intraday_live_confirm = os.getenv("INTRADAY_LIVE_CONFIRM", "true").lower() == "true"
         # Binance live trading settings
         self.binance_api_key: Optional[str] = None
         self.binance_api_secret: Optional[str] = None
         self.binance_base_url = os.getenv("BINANCE_BASE_URL", "https://api.binance.com")
         self.binance_recv_window = int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
         self.binance_timeout_sec = float(os.getenv("BINANCE_TIMEOUT_SEC", "10"))
+        self.binance_exchangeinfo_ttl = int(os.getenv("BINANCE_EXCHANGEINFO_TTL", "300"))
+        self.binance_sell_qty_buffer = float(os.getenv("BINANCE_SELL_QTY_BUFFER", "0.001"))  # 0.1% qty buffer
+        self.paper_use_live_price = os.getenv("PAPER_USE_LIVE_PRICE", "true").lower() == "true"
+        self._exchange_info_cache: Dict[str, dict] = {}
         # determine DB driver once and ensure tables
         self._driver = 'sqlite'
         conn = None
@@ -246,6 +254,7 @@ class TradingManager:
         self.intraday_enabled = True
         self.intraday_paper = paper
         self.paper_trading = paper
+        self.hybrid_enabled = False
         self.strategy_mode = "intraday"
         self.intraday_thread = threading.Thread(target=self._run_intraday_loop, daemon=True)
         self.intraday_thread.start()
@@ -308,6 +317,10 @@ class TradingManager:
         }
 
     def _latest_price(self, cur, symbol: str) -> Optional[float]:
+        if self.paper_use_live_price:
+            live = self._fetch_live_price(symbol)
+            if live is not None and live > 0:
+                return live
         cur.execute(self._q("SELECT latest_price FROM coin_monitor WHERE symbol = ?"), (symbol,))
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
@@ -356,6 +369,53 @@ class TradingManager:
     def _fmt_number(self, value: float) -> str:
         return f"{value:.8f}".rstrip("0").rstrip(".")
 
+    def _floor_to_step(self, value: float, step: float) -> float:
+        try:
+            if step <= 0:
+                return value
+            d_value = Decimal(str(value))
+            d_step = Decimal(str(step))
+            steps = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
+            return float(steps * d_step)
+        except Exception:
+            return value
+
+    def _get_exchange_filters(self, symbol: str) -> Optional[dict]:
+        """Fetch and cache Binance exchangeInfo filters for a symbol."""
+        try:
+            sym = symbol.upper()
+            cached = self._exchange_info_cache.get(sym)
+            now = time.time()
+            if cached and (now - cached.get("ts", 0) < self.binance_exchangeinfo_ttl):
+                return cached.get("filters")
+            url = f"{self.binance_base_url}/api/v3/exchangeInfo"
+            resp = requests.get(url, params={"symbol": sym}, timeout=self.binance_timeout_sec)
+            if not resp.ok:
+                logging.error(f"Binance exchangeInfo error {resp.status_code}: {resp.text}")
+                return cached.get("filters") if cached else None
+            data = resp.json()
+            symbols = data.get("symbols") or []
+            if not symbols:
+                return cached.get("filters") if cached else None
+            info = symbols[0]
+            filters = {}
+            for f in info.get("filters", []):
+                if f.get("filterType") == "PRICE_FILTER":
+                    filters["tickSize"] = float(f.get("tickSize") or 0)
+                    filters["minPrice"] = float(f.get("minPrice") or 0)
+                    filters["maxPrice"] = float(f.get("maxPrice") or 0)
+                if f.get("filterType") == "LOT_SIZE":
+                    filters["stepSize"] = float(f.get("stepSize") or 0)
+                    filters["minQty"] = float(f.get("minQty") or 0)
+                    filters["maxQty"] = float(f.get("maxQty") or 0)
+                if f.get("filterType") == "MIN_NOTIONAL":
+                    filters["minNotional"] = float(f.get("minNotional") or 0)
+            self._exchange_info_cache[sym] = {"ts": now, "filters": filters}
+            return filters
+        except Exception as e:
+            logging.error(f"Failed to fetch exchangeInfo for {symbol}: {e}")
+            return None
+
     def _binance_signed_request(self, method: str, path: str, params: dict, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         if not self._binance_ready(api_key, api_secret):
             return None
@@ -369,8 +429,11 @@ class TradingManager:
         url = f"{self.binance_base_url}{path}?{query}&signature={signature}"
         headers = {"X-MBX-APIKEY": key}
         try:
-            if method.upper() == "POST":
+            method = method.upper()
+            if method == "POST":
                 resp = requests.post(url, headers=headers, timeout=self.binance_timeout_sec)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=headers, timeout=self.binance_timeout_sec)
             else:
                 resp = requests.get(url, headers=headers, timeout=self.binance_timeout_sec)
         except Exception as e:
@@ -385,31 +448,80 @@ class TradingManager:
             logging.error("Binance API returned non-JSON response.")
             return None
 
+    def _binance_public_request(self, path: str, params: dict) -> Optional[dict]:
+        url = f"{self.binance_base_url}{path}"
+        try:
+            resp = requests.get(url, params=params, timeout=self.binance_timeout_sec)
+        except Exception as e:
+            logging.error(f"Binance public request error: {e}")
+            return None
+        if not resp.ok:
+            logging.error(f"Binance public API error {resp.status_code}: {resp.text}")
+            return None
+        try:
+            return resp.json()
+        except Exception:
+            logging.error("Binance public API returned non-JSON response.")
+            return None
+
     def _place_spot_order(
         self,
         symbol: str,
         side: str,
         quantity: Optional[float] = None,
         quote_qty: Optional[float] = None,
+        order_type: str = "MARKET",
+        price: Optional[float] = None,
+        time_in_force: Optional[str] = None,
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
     ):
+        filters = self._get_exchange_filters(symbol)
         params = {
             "symbol": symbol.upper(),
             "side": side.upper(),
-            "type": "MARKET",
+            "type": order_type.upper(),
             "newOrderRespType": "FULL",
         }
-        if side.upper() == "BUY":
-            if quote_qty is None or quote_qty <= 0:
-                logging.error("Binance BUY requires quoteOrderQty.")
+        if order_type.upper() == "MARKET":
+            if side.upper() == "BUY":
+                if quote_qty is None or quote_qty <= 0:
+                    logging.error("Binance BUY requires quoteOrderQty.")
+                    return None
+                if filters and filters.get("minNotional") and quote_qty < filters["minNotional"]:
+                    logging.error(f"Binance BUY notional too small for {symbol}: {quote_qty} < {filters['minNotional']}")
+                    return None
+                params["quoteOrderQty"] = self._fmt_number(quote_qty)
+            else:
+                if quantity is None or quantity <= 0:
+                    logging.error("Binance SELL requires quantity.")
+                    return None
+                if filters and filters.get("stepSize"):
+                    quantity = self._floor_to_step(quantity, filters["stepSize"])
+                if filters and filters.get("minQty") and quantity < filters["minQty"]:
+                    logging.error(f"Binance SELL qty too small for {symbol}: {quantity} < {filters['minQty']}")
+                    return None
+                params["quantity"] = self._fmt_number(quantity)
+        elif order_type.upper() == "LIMIT":
+            if quantity is None or quantity <= 0 or price is None or price <= 0:
+                logging.error("Binance LIMIT order requires quantity and price.")
                 return None
-            params["quoteOrderQty"] = self._fmt_number(quote_qty)
-        else:
-            if quantity is None or quantity <= 0:
-                logging.error("Binance SELL requires quantity.")
+            if filters and filters.get("stepSize"):
+                quantity = self._floor_to_step(quantity, filters["stepSize"])
+            if filters and filters.get("tickSize"):
+                price = self._floor_to_step(price, filters["tickSize"])
+            if filters and filters.get("minQty") and quantity < filters["minQty"]:
+                logging.error(f"Binance LIMIT qty too small for {symbol}: {quantity} < {filters['minQty']}")
+                return None
+            if filters and filters.get("minNotional") and (price * quantity) < filters["minNotional"]:
+                logging.error(f"Binance LIMIT notional too small for {symbol}: {price * quantity} < {filters['minNotional']}")
                 return None
             params["quantity"] = self._fmt_number(quantity)
+            params["price"] = self._fmt_number(price)
+            params["timeInForce"] = time_in_force or "GTC"
+        else:
+            logging.error(f"Unsupported Binance order type: {order_type}")
+            return None
         return self._binance_signed_request("POST", "/api/v3/order", params, api_key, api_secret)
 
     def _extract_order_fill(self, order: dict) -> dict:
@@ -417,6 +529,54 @@ class TradingManager:
         quote = float(order.get("cummulativeQuoteQty") or 0)
         price = (quote / qty) if qty > 0 else None
         return {"qty": qty, "quote": quote, "price": price}
+
+    def _get_spot_order(self, symbol: str, order_id: str):
+        params = {"symbol": symbol.upper(), "orderId": str(order_id)}
+        return self._binance_signed_request("GET", "/api/v3/order", params)
+
+    def _cancel_spot_order(self, symbol: str, order_id: str):
+        params = {"symbol": symbol.upper(), "orderId": str(order_id)}
+        return self._binance_signed_request("DELETE", "/api/v3/order", params)
+
+    def _base_asset_from_symbol(self, symbol: str) -> Optional[str]:
+        sym = (symbol or "").upper()
+        if sym.endswith("USDT"):
+            return sym[:-4]
+        return None
+
+    def _get_account_info(self):
+        return self._binance_signed_request("GET", "/api/v3/account", {})
+
+    def _get_asset_free_balance(self, asset: str) -> Optional[float]:
+        if not asset:
+            return None
+        data = self._get_account_info()
+        if not data or "balances" not in data:
+            logging.error("Failed to fetch Binance account balances.")
+            return None
+        for bal in data.get("balances", []):
+            if bal.get("asset") == asset:
+                try:
+                    return float(bal.get("free") or 0)
+                except Exception:
+                    return None
+        return 0.0
+
+    def _apply_sell_qty_buffer(self, symbol: str, qty: float) -> float:
+        base_asset = self._base_asset_from_symbol(symbol)
+        if not base_asset:
+            return qty
+        free = self._get_asset_free_balance(base_asset)
+        if free is None:
+            return qty
+        available = min(qty, free)
+        buffer_pct = max(0.0, float(self.binance_sell_qty_buffer or 0))
+        sell_qty = available * (1.0 - buffer_pct)
+        if sell_qty < available:
+            logging.info(
+                f"Adjusted sell qty for {symbol}: free={free} req={qty} buffer={buffer_pct} -> {sell_qty}"
+            )
+        return sell_qty
 
     def place_spot_order(
         self,
@@ -782,6 +942,10 @@ class TradingManager:
         qty = float(pos["qty"])
         entry_type = pos.get("entry_type")
         if not self._paper_for_entry(entry_type):
+            qty = self._apply_sell_qty_buffer(pos["symbol"], qty)
+            if qty <= 0:
+                logging.error(f"Live sell qty invalid for {pos['symbol']} (qty={qty})")
+                return
             order = self._place_spot_order(pos["symbol"], "SELL", quantity=qty)
             if not order:
                 logging.error(f"Live sell failed for {pos['symbol']}")
@@ -793,6 +957,9 @@ class TradingManager:
             qty = fill["qty"]
             if fill["price"]:
                 price = fill["price"]
+        self._finalize_position(cur, pos, qty, price, reason)
+
+    def _finalize_position(self, cur, pos: dict, qty: float, price: float, reason: str):
         entry = float(pos["entry_price"])
         pnl = (price - entry) * qty
         cash = self._get_cash(cur)
@@ -907,8 +1074,8 @@ class TradingManager:
                         margin3count, margin5count, margin10count, margin20count,
                         profit, stoploss, stoploss_limit, amount, number_of_trades,
                         pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult,
-                        bounce_pct, bounce_lookback
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bounce_pct, bounce_lookback, trades_filter_enabled, min_trades_1m
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 ),
                 (
@@ -927,6 +1094,8 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["trades_filter_enabled"],
+                    self.intraday_default_limits["min_trades_1m"],
                 ),
             )
         elif self.intraday_sync_limits:
@@ -937,7 +1106,7 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?
+                        bounce_pct = ?, bounce_lookback = ?, trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -956,6 +1125,8 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["trades_filter_enabled"],
+                    self.intraday_default_limits["min_trades_1m"],
                 ),
             )
 
@@ -1006,11 +1177,13 @@ class TradingManager:
                 "pullback_range_mult",
                 "bounce_pct",
                 "bounce_lookback",
+                "trades_filter_enabled",
+                "min_trades_1m",
             ]:
                 if key in updates and updates[key] is not None:
                     try:
                         val = updates[key]
-                        if key in ("pump_pullback_enabled", "bounce_lookback") or key.endswith("count") or key == "number_of_trades":
+                        if key in ("pump_pullback_enabled", "bounce_lookback", "trades_filter_enabled", "min_trades_1m") or key.endswith("count") or key == "number_of_trades":
                             self.intraday_default_limits[key] = int(val)
                         else:
                             self.intraday_default_limits[key] = float(val)
@@ -1024,7 +1197,7 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?
+                        bounce_pct = ?, bounce_lookback = ?, trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -1043,6 +1216,8 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["trades_filter_enabled"],
+                    self.intraday_default_limits["min_trades_1m"],
                 ),
             )
             conn.commit()
@@ -1063,7 +1238,8 @@ class TradingManager:
         cur.execute(
             """
             SELECT margin3count, margin5count, margin10count, margin20count, profit, stoploss, stoploss_limit, amount, number_of_trades,
-                   pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult, bounce_pct, bounce_lookback
+                   pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult, bounce_pct, bounce_lookback,
+                   trades_filter_enabled, min_trades_1m
             FROM intraday_limits
             LIMIT 1
             """
@@ -1087,6 +1263,8 @@ class TradingManager:
             "pullback_range_mult": float(row[12] or 0.0),
             "bounce_pct": float(row[13] or 0.0),
             "bounce_lookback": int(row[14] or 0),
+            "trades_filter_enabled": int(row[15] or 0),
+            "min_trades_1m": int(row[16] or 0),
         }
 
     def _intraday_counts(self, cur) -> dict:
@@ -1152,6 +1330,34 @@ class TradingManager:
         except Exception:
             return False
 
+    def _intraday_trades_ok(self, cur, symbol: str, limits: dict) -> bool:
+        """Require a minimum number of trades in the last 1 minute (orderflow table)."""
+        try:
+            if not limits.get("trades_filter_enabled"):
+                return True
+            min_trades = int(limits.get("min_trades_1m") or 0)
+            if min_trades <= 0:
+                return True
+            cur.execute(
+                self._q(
+                    "SELECT buy_count, sell_count, ts FROM orderflow WHERE symbol = ? ORDER BY ts DESC LIMIT 1"
+                ),
+                (symbol,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            buy_cnt = int(row[0] or 0)
+            sell_cnt = int(row[1] or 0)
+            ts = int(row[2] or 0)
+            now = int(time.time() * 1000)
+            if ts <= 0 or (now - ts) > 70000:
+                return False
+            total = buy_cnt + sell_cnt
+            return total >= min_trades
+        except Exception:
+            return False
+
     def _intraday_recent_pump_ok(self, cur, symbol: str) -> bool:
         """Skip coins that pumped too much in last 5/30 minutes."""
         try:
@@ -1179,6 +1385,25 @@ class TradingManager:
             return True
         except Exception:
             return True
+
+    def _intraday_recent_pump_ok_live(self, closes: List[float]) -> bool:
+        try:
+            if not closes or len(closes) < 30:
+                return False
+            last = closes[0]
+            close_5 = closes[4]
+            close_30 = closes[29]
+            if close_5 <= 0 or close_30 <= 0:
+                return False
+            change_5 = (last - close_5) / close_5 * 100.0
+            change_30 = (last - close_30) / close_30 * 100.0
+            if self.intraday_pump_5m_pct > 0 and change_5 >= self.intraday_pump_5m_pct:
+                return False
+            if self.intraday_pump_30m_pct > 0 and change_30 >= self.intraday_pump_30m_pct:
+                return False
+            return True
+        except Exception:
+            return False
 
     def _intraday_pump_pullback_ok(self, cur, symbol: str, limits: dict) -> bool:
         """If a coin pumped, require a pullback + bounce before allowing a buy."""
@@ -1236,6 +1461,116 @@ class TradingManager:
         except Exception:
             return True
 
+    def _intraday_pump_pullback_ok_live(self, candles: List[list], limits: dict, current_price: Optional[float]) -> bool:
+        """Live version using fresh Binance candles and optional current price."""
+        try:
+            if not candles or len(candles) < 30:
+                return False
+            closes = [float(c[4]) for c in candles if c and len(c) > 4]
+            highs = [float(c[2]) for c in candles if c and len(c) > 2]
+            lows = [float(c[3]) for c in candles if c and len(c) > 3]
+            if len(closes) < 30 or len(highs) < 30 or len(lows) < 30:
+                return False
+            current = float(current_price) if current_price else closes[0]
+            max_high = max(highs)
+            min_low = min(lows)
+            if min_low <= 0:
+                return False
+            pump_threshold = float(limits.get("pump_threshold_pct") or 0.0)
+            if pump_threshold <= 0:
+                return True
+            pump_pct = (max_high - min_low) / min_low * 100.0
+            if pump_pct < pump_threshold:
+                return True
+
+            # Compute a simple ATR from recent live candles (last 14)
+            atr = None
+            try:
+                chron = list(reversed(candles))  # oldest -> newest
+                recent = chron[-15:] if len(chron) >= 15 else chron
+                if len(recent) >= 2:
+                    trs = []
+                    prev_close = float(recent[0][4])
+                    for c in recent[1:]:
+                        high = float(c[2])
+                        low = float(c[3])
+                        close = float(c[4])
+                        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                        trs.append(tr)
+                        prev_close = close
+                    if trs:
+                        atr = sum(trs) / len(trs)
+            except Exception:
+                atr = None
+            pullback_abs = 0.0
+            pullback_atr_mult = float(limits.get("pullback_atr_mult") or 0.0)
+            pullback_range_mult = float(limits.get("pullback_range_mult") or 0.0)
+            if atr is not None and pullback_atr_mult > 0:
+                pullback_abs = max(pullback_abs, atr * pullback_atr_mult)
+            range_val = max_high - min_low
+            if range_val > 0 and pullback_range_mult > 0:
+                pullback_abs = max(pullback_abs, range_val * pullback_range_mult)
+            if pullback_abs > 0 and current > (max_high - pullback_abs):
+                return False
+
+            bounce_pct = float(limits.get("bounce_pct") or 0.0)
+            if bounce_pct > 0:
+                lookback = int(limits.get("bounce_lookback") or 0)
+                if lookback <= 0:
+                    lookback = 5
+                recent_lows = lows[:lookback] if len(lows) >= lookback else lows
+                if not recent_lows:
+                    return False
+                recent_low = min(recent_lows)
+                if recent_low <= 0:
+                    return False
+                if current < recent_low * (1 + bounce_pct / 100.0):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _fetch_live_candles(self, symbol: str, limit: int = 30) -> Optional[List[list]]:
+        data = self._binance_public_request(
+            "/api/v3/klines",
+            {"symbol": symbol.upper(), "interval": "1m", "limit": limit},
+        )
+        if not isinstance(data, list):
+            return None
+        # Binance returns oldest->newest; reverse to keep newest first like DB queries
+        return list(reversed(data))
+
+    def _fetch_live_price(self, symbol: str) -> Optional[float]:
+        data = self._binance_public_request("/api/v3/ticker/price", {"symbol": symbol.upper()})
+        try:
+            return float(data.get("price")) if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _live_intraday_entry_ok(self, symbol: str, limits: dict) -> bool:
+        candles = self._fetch_live_candles(symbol, limit=30)
+        if not candles or len(candles) < 30:
+            logging.warning(f"Live entry blocked for {symbol}: insufficient live candles")
+            return False
+        live_price = self._fetch_live_price(symbol)
+        if live_price is None:
+            logging.warning(f"Live entry blocked for {symbol}: missing live price")
+            return False
+        closes = [float(c[4]) for c in candles if c and len(c) > 4]
+        if not closes or len(closes) < 30:
+            logging.warning(f"Live entry blocked for {symbol}: insufficient close data")
+            return False
+        # Always apply recent pump block using live candles
+        if not self._intraday_recent_pump_ok_live(closes):
+            logging.info(f"Live entry blocked for {symbol}: recent pump too strong")
+            return False
+        # If pump/pullback is enabled, validate using live candles + live price
+        if limits.get("pump_pullback_enabled"):
+            if not self._intraday_pump_pullback_ok_live(candles, limits, live_price):
+                logging.info(f"Live entry blocked for {symbol}: pump/pullback not satisfied (live)")
+                return False
+        return True
+
     def _seed_intraday_state(self, cur, pg: bool, reset: bool):
         if reset:
             cur.execute("DELETE FROM intraday_trading")
@@ -1283,7 +1618,7 @@ class TradingManager:
             data,
         )
 
-    def _open_intraday_position(self, cur, symbol: str, price: float, amount: float, profit_pct: float, stop_pct: float) -> bool:
+    def _open_intraday_position(self, cur, symbol: str, price: float, amount: float, profit_pct: float, stop_pct: float, limits: dict) -> bool:
         cash = self._get_cash(cur)
         if cash <= 0 or amount <= 0 or price <= 0:
             return False
@@ -1292,7 +1627,11 @@ class TradingManager:
         qty = amount / price
         if qty <= 0:
             return False
+        tp_order_id = None
+        tp_order_status = None
         if not self.intraday_paper:
+            if self.intraday_live_confirm and not self._live_intraday_entry_ok(symbol, limits):
+                return False
             order = self._place_spot_order(symbol, "BUY", quote_qty=amount)
             if not order:
                 logging.error(f"Live intraday buy failed for {symbol}")
@@ -1306,17 +1645,37 @@ class TradingManager:
                 price = fill["price"]
             if fill["quote"] > 0:
                 amount = fill["quote"]
+            adjusted_qty = self._apply_sell_qty_buffer(symbol, qty)
+            if adjusted_qty > 0:
+                qty = adjusted_qty
+            else:
+                logging.error(f"Unable to determine sellable qty for {symbol} after BUY; keeping filled qty.")
         stop_price = None
         if not self.intraday_disable_stop and stop_pct and stop_pct > 0:
             stop_price = price * (1 - stop_pct / 100.0)
         tp_price = price * (1 + profit_pct / 100.0)
+        if not self.intraday_paper:
+            tp_order = self._place_spot_order(
+                symbol,
+                "SELL",
+                quantity=qty,
+                order_type="LIMIT",
+                price=tp_price,
+                time_in_force="GTC",
+            )
+            if tp_order:
+                tp_order_id = str(tp_order.get("orderId") or "")
+                tp_order_status = tp_order.get("status") or "NEW"
+                logging.info(f"Placed intraday TP limit for {symbol}: id={tp_order_id} price={tp_price} qty={qty}")
+            else:
+                logging.error(f"Failed to place intraday TP limit for {symbol} at {tp_price}")
         new_cash = cash - amount
         self._set_cash(cur, new_cash)
         cur.execute(
             self._q(
                 """
-                INSERT INTO paper_positions(symbol, qty, entry_price, stop_price, take_profit_price, entry_type, r_value, breakeven_set, partial_taken, trailing_stop)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO paper_positions(symbol, qty, entry_price, stop_price, take_profit_price, entry_type, r_value, breakeven_set, partial_taken, trailing_stop, tp_order_id, tp_order_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
             ),
             (
@@ -1330,6 +1689,8 @@ class TradingManager:
                 0,
                 0,
                 stop_price,
+                tp_order_id,
+                tp_order_status,
             ),
         )
         cur.execute(
@@ -1343,14 +1704,14 @@ class TradingManager:
         cur.execute(
             self._q(
                 """
-                SELECT id, symbol, qty, entry_price, stop_price, take_profit_price, entry_type
+                SELECT id, symbol, qty, entry_price, stop_price, take_profit_price, entry_type, tp_order_id, tp_order_status
                 FROM paper_positions
                 WHERE status = 'OPEN' AND entry_type = 'intraday'
                 """
             )
         )
         rows = cur.fetchall()
-        cols = ["id", "symbol", "qty", "entry_price", "stop_price", "take_profit_price", "entry_type"]
+        cols = ["id", "symbol", "qty", "entry_price", "stop_price", "take_profit_price", "entry_type", "tp_order_id", "tp_order_status"]
         return [dict(zip(cols, r)) for r in rows]
 
     def _manage_intraday_positions(self, cur) -> bool:
@@ -1360,12 +1721,37 @@ class TradingManager:
             price = self._latest_price(cur, pos["symbol"])
             if price is None:
                 continue
+            tp_order_active = False
+            if not self.intraday_paper and pos.get("tp_order_id"):
+                order = self._get_spot_order(pos["symbol"], pos["tp_order_id"])
+                if order:
+                    status = order.get("status")
+                    if status and status != pos.get("tp_order_status"):
+                        cur.execute(self._q("UPDATE paper_positions SET tp_order_status = ? WHERE id = ?"), (status, pos["id"]))
+                        dirty = True
+                    if status == "FILLED":
+                        fill = self._extract_order_fill(order)
+                        exec_qty = fill["qty"] if fill["qty"] > 0 else float(pos["qty"])
+                        exec_price = fill["price"] or float(pos.get("take_profit_price") or price)
+                        self._finalize_position(cur, pos, exec_qty, exec_price, "intraday_tp_filled")
+                        dirty = True
+                        continue
+                    if status in ("CANCELED", "REJECTED", "EXPIRED"):
+                        cur.execute(self._q("UPDATE paper_positions SET tp_order_id = NULL, tp_order_status = NULL WHERE id = ?"), (pos["id"],))
+                        dirty = True
+                    else:
+                        tp_order_active = True
             if not self.intraday_disable_stop and pos["stop_price"] is not None:
                 if price <= float(pos["stop_price"]):
+                    if not self.intraday_paper and pos.get("tp_order_id"):
+                        cancel = self._cancel_spot_order(pos["symbol"], pos["tp_order_id"])
+                        if cancel:
+                            cur.execute(self._q("UPDATE paper_positions SET tp_order_id = NULL, tp_order_status = ? WHERE id = ?"), ("CANCELED", pos["id"]))
+                            dirty = True
                     self._close_position(cur, pos, price, "intraday_stop")
                     dirty = True
                     continue
-            if pos["take_profit_price"] is not None and price >= float(pos["take_profit_price"]):
+            if pos["take_profit_price"] is not None and price >= float(pos["take_profit_price"]) and not tp_order_active:
                 self._close_position(cur, pos, price, "intraday_tp")
                 dirty = True
                 continue
@@ -1406,7 +1792,8 @@ class TradingManager:
 
                 # Enforce max open positions = number_of_trades
                 open_positions = self._intraday_open_positions(cur)
-                if len(open_positions) >= trades_count:
+                open_count = len(open_positions)
+                if open_count >= trades_count:
                     try:
                         cur.close(); conn.close()
                     except Exception:
@@ -1428,6 +1815,8 @@ class TradingManager:
                 )
                 rows = cur.fetchall()
                 for row in rows:
+                    if open_count >= trades_count:
+                        break
                     symbol, margin3, margin5, margin10, margin20, mar3, mar5, mar10, mar20 = row
                     price = price_map.get(symbol)
                     if price is None:
@@ -1435,6 +1824,8 @@ class TradingManager:
                     if not self._intraday_trend_ok(cur, symbol, price):
                         continue
                     if not self._intraday_volume_ok(cur, symbol):
+                        continue
+                    if not self._intraday_trades_ok(cur, symbol, limits):
                         continue
                     if limits.get("pump_pullback_enabled"):
                         if not self._intraday_pump_pullback_ok(cur, symbol, limits):
@@ -1445,30 +1836,34 @@ class TradingManager:
 
                     if counts["sum_mar3"] < limits["margin3count"]:
                         if price >= float(margin3 or 0) and not mar3:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"]):
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
                                 counts["sum_mar3"] += 1
+                                open_count += 1
                             continue
 
                     if counts["sum_mar5"] < limits["margin5count"]:
                         if price >= float(margin5 or 0) and not mar5:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"]):
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar5 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
                                 counts["sum_mar5"] += 1
+                                open_count += 1
                             continue
 
                     if counts["sum_mar10"] < limits["margin10count"]:
                         if price >= float(margin10 or 0) and not mar10:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"]):
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar10 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
                                 counts["sum_mar10"] += 1
+                                open_count += 1
                             continue
 
                     if counts["sum_mar20"] < limits["margin20count"]:
                         if price >= float(margin20 or 0) and not mar20:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"]):
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar20 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
                                 counts["sum_mar20"] += 1
+                                open_count += 1
                             continue
 
                 conn.commit()

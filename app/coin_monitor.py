@@ -91,6 +91,14 @@ class CoinMonitor(CoinMonitorBase):
     class Config:
         orm_mode = True
 
+_DB_LOGGED = False
+
+def _log_db_once(message: str):
+    global _DB_LOGGED
+    if not _DB_LOGGED:
+        logging.info(message)
+        _DB_LOGGED = True
+
 def get_database_connection():
     """Create and return a database connection (PostgreSQL or SQLite)."""
     connection = None
@@ -107,7 +115,7 @@ def get_database_connection():
                     database=os.getenv('DB_NAME', 'coin_monitor'),
                 )
                 cursor = connection.cursor()
-                logging.info("Successfully connected to the PostgreSQL database.")
+                _log_db_once("Successfully connected to the PostgreSQL database.")
                 return connection, cursor
             except Exception as e:
                 logging.error(f"Error connecting to PostgreSQL database: {e}")
@@ -153,7 +161,7 @@ def get_database_connection():
             )
         ''')
         connection.commit()
-        logging.info("Successfully connected to the SQLite database.")
+        _log_db_once("Successfully connected to the SQLite database.")
         return connection, cursor
     except Exception as e:
         logging.error(f"Error connecting to database: {e}")

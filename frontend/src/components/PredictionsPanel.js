@@ -62,7 +62,7 @@ export default function PredictionsPanel() {
 
       {!loading && !hasData && (
         <div style={{ color: '#9ca3af' }}>
-          No predictions yet. Make sure patterns exist (Patterns tab → run discovery) and give the ingestors a minute.
+          No predictions yet. Make sure patterns exist (run discovery) and give the ingestors a minute.
         </div>
       )}
 

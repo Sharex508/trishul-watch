@@ -46,6 +46,8 @@ export default function TradingPanel({ selectedSymbol }) {
   const [intradayAmount, setIntradayAmount] = useState('');
   const [intradayTrades, setIntradayTrades] = useState('');
   const [intradayPumpPullback, setIntradayPumpPullback] = useState(false);
+  const [intradayTradesFilter, setIntradayTradesFilter] = useState(true);
+  const [intradayMinTrades, setIntradayMinTrades] = useState('50');
   const [intradayMsg, setIntradayMsg] = useState('');
 
   // Load persisted preferences
@@ -81,6 +83,8 @@ export default function TradingPanel({ selectedSymbol }) {
         if (json.amount !== undefined) setIntradayAmount(json.amount);
         if (json.number_of_trades !== undefined) setIntradayTrades(json.number_of_trades);
         if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
+        if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
+        if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
       }
     } catch (e) {
       // ignore
@@ -224,6 +228,8 @@ export default function TradingPanel({ selectedSymbol }) {
         amount: intradayAmount === '' ? undefined : Number(intradayAmount),
         number_of_trades: intradayTrades === '' ? undefined : Number(intradayTrades),
         pump_pullback_enabled: intradayPumpPullback ? 1 : 0,
+        trades_filter_enabled: intradayTradesFilter ? 1 : 0,
+        min_trades_1m: intradayMinTrades === '' ? undefined : Number(intradayMinTrades),
       };
       const res = await fetch(`${API_URL}/api/trading/intraday-limits`, {
         method: 'POST',
@@ -235,6 +241,8 @@ export default function TradingPanel({ selectedSymbol }) {
       if (json.amount !== undefined) setIntradayAmount(json.amount);
       if (json.number_of_trades !== undefined) setIntradayTrades(json.number_of_trades);
       if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
+      if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
+      if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
       setIntradayMsg('Intraday limits updated.');
     } catch (e) {
       setError(e.message || String(e));
@@ -261,6 +269,12 @@ export default function TradingPanel({ selectedSymbol }) {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (strategy === 'intraday' && status.hybrid_enabled && !busy) {
+      toggleHybrid(false);
+    }
+  }, [strategy, status.hybrid_enabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="content" style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 2fr' }}>
@@ -336,6 +350,23 @@ export default function TradingPanel({ selectedSymbol }) {
                 />
                 Pump→pullback filter (require pullback + bounce after 30m pump)
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={intradayTradesFilter}
+                  onChange={(e) => setIntradayTradesFilter(e.target.checked)}
+                />
+                Min trades in last 1m (default 50)
+              </label>
+              {intradayTradesFilter && (
+                <input
+                  type="number"
+                  className="overlay-input"
+                  value={intradayMinTrades}
+                  onChange={(e) => setIntradayMinTrades(e.target.value)}
+                  placeholder="e.g. 50"
+                />
+              )}
               <button disabled={busy} onClick={saveIntradayLimits} className="admin-button">Update intraday limits</button>
               {intradayMsg && <div style={{ color: '#22c55e', fontSize: 12 }}>{intradayMsg}</div>}
             </div>
@@ -346,9 +377,9 @@ export default function TradingPanel({ selectedSymbol }) {
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
             <input
               type="checkbox"
-              checked={!!status.hybrid_enabled}
+              checked={strategy === 'intraday' ? false : !!status.hybrid_enabled}
               onChange={(e) => toggleHybrid(e.target.checked)}
-              disabled={busy}
+              disabled={busy || strategy === 'intraday'}
             />{' '}
             Hybrid mode (AI decide; unchecked disables hybrid loop)
           </label>
