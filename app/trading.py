@@ -118,6 +118,7 @@ class TradingManager:
         self.intraday_pump_5m_pct = float(os.getenv("INTRADAY_PUMP_5M_PCT", "1.5"))
         self.intraday_pump_30m_pct = float(os.getenv("INTRADAY_PUMP_30M_PCT", "3.0"))
         self.intraday_live_confirm = os.getenv("INTRADAY_LIVE_CONFIRM", "true").lower() == "true"
+        self.intraday_cooldown_sec = int(os.getenv("INTRADAY_COOLDOWN_SEC", "600"))
         # Binance live trading settings
         self.binance_api_key: Optional[str] = None
         self.binance_api_secret: Optional[str] = None
@@ -970,6 +971,17 @@ class TradingManager:
             self._q("INSERT INTO trade_logs(symbol, side, qty, price, pnl, balance_after, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED')"),
             (pos["symbol"], "SELL", qty, price, pnl, cash, reason),
         )
+        # Allow intraday symbols to be re-traded after a cooldown by resetting status
+        if pos.get("entry_type") == "intraday":
+            try:
+                cur.execute(
+                    self._q(
+                        "UPDATE intraday_trading SET status = '0', mar3 = 0, mar5 = 0, mar10 = 0, mar20 = 0, purchase_price = NULL WHERE symbol = ?"
+                    ),
+                    (pos["symbol"],),
+                )
+            except Exception:
+                pass
         # Track stop exits for potential re-entry logic
         try:
             if "stop" in (reason or "").lower() or "sl" in (reason or "").lower():
@@ -1357,6 +1369,16 @@ class TradingManager:
             return total >= min_trades
         except Exception:
             return False
+
+    def _intraday_cooldown_ok(self, symbol: str) -> bool:
+        """Block re-entry on the same symbol until cooldown expires."""
+        try:
+            last = self._last_exit_ts.get(symbol)
+            if not last:
+                return True
+            return (time.time() - float(last)) >= float(self.intraday_cooldown_sec or 0)
+        except Exception:
+            return True
 
     def _intraday_recent_pump_ok(self, cur, symbol: str) -> bool:
         """Skip coins that pumped too much in last 5/30 minutes."""
@@ -1783,8 +1805,10 @@ class TradingManager:
                     time.sleep(self.intraday_loop_sec)
                     continue
 
-                trades_count = max(1, int(limits.get("number_of_trades") or 1))
-                per_trade_amount = float(limits.get("amount") or 0.0) / trades_count
+                raw_trades = int(limits.get("number_of_trades") or 0)
+                unlimited_trades = raw_trades <= 0
+                trades_count = max(1, raw_trades)
+                per_trade_amount = float(limits.get("amount") or 0.0) / (1 if unlimited_trades else trades_count)
 
                 # Manage open intraday positions
                 if self._manage_intraday_positions(cur):
@@ -1793,7 +1817,8 @@ class TradingManager:
                 # Enforce max open positions = number_of_trades
                 open_positions = self._intraday_open_positions(cur)
                 open_count = len(open_positions)
-                if open_count >= trades_count:
+                open_symbols = {p.get("symbol") for p in open_positions if p.get("symbol")}
+                if not unlimited_trades and open_count >= trades_count:
                     try:
                         cur.close(); conn.close()
                     except Exception:
@@ -1820,6 +1845,10 @@ class TradingManager:
                     symbol, margin3, margin5, margin10, margin20, mar3, mar5, mar10, mar20 = row
                     price = price_map.get(symbol)
                     if price is None:
+                        continue
+                    if symbol in open_symbols:
+                        continue
+                    if not self._intraday_cooldown_ok(symbol):
                         continue
                     if not self._intraday_trend_ok(cur, symbol, price):
                         continue

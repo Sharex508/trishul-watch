@@ -340,7 +340,7 @@ export default function TradingPanel({ selectedSymbol }) {
                 className="overlay-input"
                 value={intradayTrades}
                 onChange={(e) => setIntradayTrades(e.target.value)}
-                placeholder="Max open trades (e.g. 10)"
+                placeholder="Max open trades (0 = unlimited)"
               />
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 <input
