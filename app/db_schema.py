@@ -699,6 +699,7 @@ def ensure_intraday_tables(cur, pg: bool):
                 pullback_range_mult DOUBLE PRECISION,
                 bounce_pct DOUBLE PRECISION,
                 bounce_lookback INTEGER,
+                avoid_top_pct DOUBLE PRECISION,
                 trades_filter_enabled INTEGER DEFAULT 1,
                 min_trades_1m INTEGER
             )
@@ -711,6 +712,7 @@ def ensure_intraday_tables(cur, pg: bool):
         add_col(cur, "intraday_limits", "pullback_range_mult", "DOUBLE PRECISION", pg=pg)
         add_col(cur, "intraday_limits", "bounce_pct", "DOUBLE PRECISION", pg=pg)
         add_col(cur, "intraday_limits", "bounce_lookback", "INTEGER", pg=pg)
+        add_col(cur, "intraday_limits", "avoid_top_pct", "DOUBLE PRECISION", pg=pg)
         add_col(cur, "intraday_limits", "trades_filter_enabled", "INTEGER", "DEFAULT 1", pg=pg)
         add_col(cur, "intraday_limits", "min_trades_1m", "INTEGER", pg=pg)
         cur.execute(
@@ -760,11 +762,13 @@ def ensure_intraday_tables(cur, pg: bool):
                 pullback_range_mult REAL,
                 bounce_pct REAL,
                 bounce_lookback INTEGER,
+                avoid_top_pct REAL,
                 trades_filter_enabled INTEGER DEFAULT 1,
                 min_trades_1m INTEGER
             )
             """
         )
+        add_col(cur, "intraday_limits", "avoid_top_pct", "REAL", pg=pg)
         add_col(cur, "intraday_limits", "trades_filter_enabled", "INTEGER", "DEFAULT 1", pg=pg)
         add_col(cur, "intraday_limits", "min_trades_1m", "INTEGER", pg=pg)
         cur.execute(

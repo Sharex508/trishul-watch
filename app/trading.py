@@ -5,7 +5,7 @@ import os
 import hmac
 import hashlib
 import urllib.parse
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional, List, Dict
 
 import requests
@@ -103,10 +103,11 @@ class TradingManager:
             "number_of_trades": int(os.getenv("INTRADAY_NUM_TRADES", "10")),
             "pump_pullback_enabled": 1 if os.getenv("INTRADAY_PUMP_PULLBACK_ENABLED", "false").lower() == "true" else 0,
             "pump_threshold_pct": float(os.getenv("INTRADAY_PUMP_THRESHOLD_PCT", "3.0")),
-            "pullback_atr_mult": float(os.getenv("INTRADAY_PULLBACK_ATR_MULT", "1.0")),
-            "pullback_range_mult": float(os.getenv("INTRADAY_PULLBACK_RANGE_MULT", "0.4")),
-            "bounce_pct": float(os.getenv("INTRADAY_BOUNCE_PCT", "0.5")),
+            "pullback_atr_mult": float(os.getenv("INTRADAY_PULLBACK_ATR_MULT", "1.5")),
+            "pullback_range_mult": float(os.getenv("INTRADAY_PULLBACK_RANGE_MULT", "0.6")),
+            "bounce_pct": float(os.getenv("INTRADAY_BOUNCE_PCT", "0.3")),
             "bounce_lookback": int(os.getenv("INTRADAY_BOUNCE_LOOKBACK", "5")),
+            "avoid_top_pct": float(os.getenv("INTRADAY_AVOID_TOP_PCT", "1.0")),
             "trades_filter_enabled": 1 if os.getenv("INTRADAY_TRADES_FILTER_ENABLED", "true").lower() == "true" else 0,
             "min_trades_1m": int(os.getenv("INTRADAY_MIN_TRADES_1M", "50")),
         }
@@ -119,6 +120,16 @@ class TradingManager:
         self.intraday_pump_30m_pct = float(os.getenv("INTRADAY_PUMP_30M_PCT", "3.0"))
         self.intraday_live_confirm = os.getenv("INTRADAY_LIVE_CONFIRM", "true").lower() == "true"
         self.intraday_cooldown_sec = int(os.getenv("INTRADAY_COOLDOWN_SEC", "600"))
+        self.intraday_loss_exit_pct = float(os.getenv("INTRADAY_LOSS_EXIT_PCT", "2.0"))
+        self.intraday_loss_exit_candles = int(os.getenv("INTRADAY_LOSS_EXIT_CANDLES", "5"))
+        self.intraday_loss_sell_ratio = float(os.getenv("INTRADAY_LOSS_SELL_RATIO", "1.2"))
+        self.intraday_fee_buffer_pct = float(os.getenv("INTRADAY_FEE_BUFFER_PCT", "0.2"))
+        self.intraday_loss_red_ratio = float(os.getenv("INTRADAY_LOSS_RED_RATIO", "0.6"))
+        self.intraday_trend_slope_lookback = int(os.getenv("INTRADAY_TREND_SLOPE_LOOKBACK", "5"))
+        self.intraday_trend_slope_min = float(os.getenv("INTRADAY_TREND_SLOPE_MIN", "0.0"))
+        self.intraday_bearish_block_enabled = os.getenv("INTRADAY_BEARISH_BLOCK_ENABLED", "true").lower() == "true"
+        self.intraday_bearish_lookback = int(os.getenv("INTRADAY_BEARISH_LOOKBACK", "8"))
+        self.intraday_trend_exit_pct = float(os.getenv("INTRADAY_TREND_EXIT_PCT", "0.7"))
         # Binance live trading settings
         self.binance_api_key: Optional[str] = None
         self.binance_api_secret: Optional[str] = None
@@ -380,6 +391,30 @@ class TradingManager:
             return float(steps * d_step)
         except Exception:
             return value
+
+    def _ceil_to_step(self, value: float, step: float) -> float:
+        try:
+            if step <= 0:
+                return value
+            d_value = Decimal(str(value))
+            d_step = Decimal(str(step))
+            steps = (d_value / d_step).to_integral_value(rounding=ROUND_UP)
+            return float(steps * d_step)
+        except Exception:
+            return value
+
+    def _ema(self, values: List[float], period: int) -> Optional[float]:
+        try:
+            if not values:
+                return None
+            period = max(1, min(int(period), len(values)))
+            alpha = 2.0 / (period + 1.0)
+            ema = float(values[0])
+            for v in values[1:]:
+                ema = (float(v) - ema) * alpha + ema
+            return ema
+        except Exception:
+            return None
 
     def _get_exchange_filters(self, symbol: str) -> Optional[dict]:
         """Fetch and cache Binance exchangeInfo filters for a symbol."""
@@ -1086,8 +1121,8 @@ class TradingManager:
                         margin3count, margin5count, margin10count, margin20count,
                         profit, stoploss, stoploss_limit, amount, number_of_trades,
                         pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult,
-                        bounce_pct, bounce_lookback, trades_filter_enabled, min_trades_1m
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bounce_pct, bounce_lookback, avoid_top_pct, trades_filter_enabled, min_trades_1m
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 ),
                 (
@@ -1106,6 +1141,7 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["avoid_top_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1118,7 +1154,7 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?, trades_filter_enabled = ?, min_trades_1m = ?
+                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -1137,6 +1173,7 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["avoid_top_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1189,6 +1226,7 @@ class TradingManager:
                 "pullback_range_mult",
                 "bounce_pct",
                 "bounce_lookback",
+                "avoid_top_pct",
                 "trades_filter_enabled",
                 "min_trades_1m",
             ]:
@@ -1209,7 +1247,7 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?, trades_filter_enabled = ?, min_trades_1m = ?
+                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -1228,6 +1266,7 @@ class TradingManager:
                     self.intraday_default_limits["pullback_range_mult"],
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
+                    self.intraday_default_limits["avoid_top_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1251,7 +1290,7 @@ class TradingManager:
             """
             SELECT margin3count, margin5count, margin10count, margin20count, profit, stoploss, stoploss_limit, amount, number_of_trades,
                    pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult, bounce_pct, bounce_lookback,
-                   trades_filter_enabled, min_trades_1m
+                   avoid_top_pct, trades_filter_enabled, min_trades_1m
             FROM intraday_limits
             LIMIT 1
             """
@@ -1275,8 +1314,9 @@ class TradingManager:
             "pullback_range_mult": float(row[12] or 0.0),
             "bounce_pct": float(row[13] or 0.0),
             "bounce_lookback": int(row[14] or 0),
-            "trades_filter_enabled": int(row[15] or 0),
-            "min_trades_1m": int(row[16] or 0),
+            "avoid_top_pct": float(row[15] or 0.0),
+            "trades_filter_enabled": int(row[16] or 0),
+            "min_trades_1m": int(row[17] or 0),
         }
 
     def _intraday_counts(self, cur) -> dict:
@@ -1312,11 +1352,97 @@ class TradingManager:
                 return False
             ema25 = float(row[0] or 0.0)
             ema7 = float(row[1] or 0.0)
-            if self.intraday_trend_filter == "ema25":
-                return price >= ema25 if ema25 > 0 else False
-            if self.intraday_trend_filter == "ema7_ema25":
-                return ema7 > ema25 if ema25 > 0 else False
+            if ema25 <= 0:
+                return False
+            if self.intraday_trend_filter == "ema25" and price < ema25:
+                return False
+            if self.intraday_trend_filter == "ema7_ema25" and ema7 <= ema25:
+                return False
+
+            # Optional slope check to avoid drifting downtrends
+            lookback = max(2, int(self.intraday_trend_slope_lookback or 0))
+            slope_min = float(self.intraday_trend_slope_min or 0.0)
+            if lookback > 1 and slope_min >= 0:
+                cur.execute(
+                    self._q(
+                        "SELECT ema25 FROM features WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT ?"
+                    ),
+                    (symbol, "1m", lookback),
+                )
+                rows = cur.fetchall()
+                vals = [float(r[0]) for r in rows if r and r[0] is not None]
+                if len(vals) >= 2:
+                    ema_now = vals[0]
+                    ema_prev = vals[-1]
+                    if ema_prev > 0:
+                        slope_pct = (ema_now - ema_prev) / ema_prev * 100.0
+                        if slope_pct < slope_min:
+                            return False
             return True
+        except Exception:
+            return False
+
+    def _intraday_bearish_pattern_from_ohlc(self, opens: List[float], closes: List[float], price: float, lookback: int) -> bool:
+        try:
+            if not opens or not closes:
+                return False
+            n = max(5, min(int(lookback), len(closes)))
+            opens = opens[-n:]
+            closes = closes[-n:]
+            red = sum(1 for i in range(n) if closes[i] < opens[i])
+            red_ratio = red / float(n) if n > 0 else 0.0
+            ema_fast = self._ema(closes, 9)
+            ema_slow = self._ema(closes, 25)
+            if ema_fast is None or ema_slow is None:
+                return False
+            trend_bearish = ema_fast < ema_slow and price <= ema_slow
+            slope_bearish = False
+            if len(closes) >= 6:
+                recent = sum(closes[-3:]) / 3.0
+                prev = sum(closes[-6:-3]) / 3.0
+                if prev > 0:
+                    slope_bearish = (recent - prev) / prev < 0
+            return trend_bearish and slope_bearish and red_ratio >= float(self.intraday_loss_red_ratio or 0.6)
+        except Exception:
+            return False
+
+    def _intraday_bearish_block(self, cur, symbol: str, price: float) -> bool:
+        if not self.intraday_bearish_block_enabled:
+            return False
+        try:
+            lookback = max(5, int(self.intraday_bearish_lookback or 8))
+            cur.execute(
+                self._q(
+                    "SELECT open, close FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT ?"
+                ),
+                (symbol, "1m", lookback),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return False
+            opens = [float(r[0]) for r in rows if r and r[0] is not None]
+            closes = [float(r[1]) for r in rows if r and r[1] is not None]
+            if len(opens) < 5 or len(closes) < 5:
+                return False
+            # Reverse to oldest->newest for pattern detection
+            opens = list(reversed(opens))
+            closes = list(reversed(closes))
+            return self._intraday_bearish_pattern_from_ohlc(opens, closes, price, lookback)
+        except Exception:
+            return False
+
+    def _intraday_bearish_block_live(self, candles: List[list], price: float) -> bool:
+        if not self.intraday_bearish_block_enabled:
+            return False
+        try:
+            lookback = max(5, int(self.intraday_bearish_lookback or 8))
+            chron = list(reversed(candles))  # oldest -> newest
+            recent = chron[-lookback:] if len(chron) >= lookback else chron
+            opens = [float(c[1]) for c in recent if c and len(c) > 1]
+            closes = [float(c[4]) for c in recent if c and len(c) > 4]
+            if len(opens) < 5 or len(closes) < 5:
+                return False
+            return self._intraday_bearish_pattern_from_ohlc(opens, closes, price, lookback)
         except Exception:
             return False
 
@@ -1379,6 +1505,102 @@ class TradingManager:
             return (time.time() - float(last)) >= float(self.intraday_cooldown_sec or 0)
         except Exception:
             return True
+
+    def _intraday_loss_exit(self, cur, pos: dict, price: float) -> bool:
+        """Exit early if price drifts down with a confirmed bearish pattern."""
+        try:
+            entry = float(pos.get("entry_price") or 0)
+            if entry <= 0 or price <= 0:
+                return False
+            loss_pct = (entry - price) / entry * 100.0
+            if loss_pct < float(self.intraday_loss_exit_pct or 0):
+                return False
+            n = max(5, int(self.intraday_loss_exit_candles or 5))
+            cur.execute(
+                self._q(
+                    "SELECT open, close FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT ?"
+                ),
+                (pos["symbol"], "1m", n),
+            )
+            rows = cur.fetchall()
+            opens = [float(r[0]) for r in rows if r and r[0] is not None]
+            closes = [float(r[1]) for r in rows if r and r[1] is not None]
+            if len(closes) < 5 or len(opens) < 5:
+                return False
+            opens = list(reversed(opens))
+            closes = list(reversed(closes))
+            lookback = min(n, len(closes))
+            red = 0
+            for i in range(-lookback, 0):
+                if closes[i] < opens[i]:
+                    red += 1
+            red_ratio = red / float(lookback) if lookback > 0 else 0.0
+
+            ema_fast = self._ema(closes, 9)
+            ema_slow = self._ema(closes, 25)
+            trend_bearish = False
+            if ema_fast is not None and ema_slow is not None:
+                trend_bearish = ema_fast < ema_slow
+            # Short-term slope (last 3 vs previous 3)
+            slope_bearish = False
+            if len(closes) >= 6:
+                recent = sum(closes[-3:]) / 3.0
+                prev = sum(closes[-6:-3]) / 3.0
+                if prev > 0:
+                    slope_bearish = (recent - prev) / prev < 0
+            price_below_slow = True
+            if ema_slow is not None:
+                price_below_slow = price <= ema_slow
+
+            # Trade imbalance check (last 1m)
+            cur.execute(
+                self._q("SELECT buy_count, sell_count, ts FROM orderflow WHERE symbol = ? ORDER BY ts DESC LIMIT 1"),
+                (pos["symbol"],),
+            )
+            row = cur.fetchone()
+            trades_bearish = False
+            if row:
+                buy_cnt = float(row[0] or 0)
+                sell_cnt = float(row[1] or 0)
+                ts = int(row[2] or 0)
+                now = int(time.time() * 1000)
+                if ts > 0 and (now - ts) <= 70000 and buy_cnt >= 0 and sell_cnt >= 0:
+                    if sell_cnt > buy_cnt * float(self.intraday_loss_sell_ratio or 1.2):
+                        trades_bearish = True
+            pattern_bearish = trend_bearish and slope_bearish and price_below_slow
+            red_ok = red_ratio >= float(self.intraday_loss_red_ratio or 0.6)
+            return pattern_bearish and (trades_bearish or red_ok)
+        except Exception:
+            return False
+
+    def _intraday_trend_exit(self, cur, pos: dict, price: float) -> bool:
+        """Exit sooner when a clear bearish pattern persists (smaller loss than stop)."""
+        try:
+            entry = float(pos.get("entry_price") or 0)
+            if entry <= 0 or price <= 0:
+                return False
+            loss_pct = (entry - price) / entry * 100.0
+            if loss_pct < float(self.intraday_trend_exit_pct or 0):
+                return False
+            lookback = max(5, int(self.intraday_loss_exit_candles or 5))
+            cur.execute(
+                self._q(
+                    "SELECT open, close FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT ?"
+                ),
+                (pos["symbol"], "1m", lookback),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return False
+            opens = [float(r[0]) for r in rows if r and r[0] is not None]
+            closes = [float(r[1]) for r in rows if r and r[1] is not None]
+            if len(opens) < 5 or len(closes) < 5:
+                return False
+            opens = list(reversed(opens))
+            closes = list(reversed(closes))
+            return self._intraday_bearish_pattern_from_ohlc(opens, closes, price, lookback)
+        except Exception:
+            return False
 
     def _intraday_recent_pump_ok(self, cur, symbol: str) -> bool:
         """Skip coins that pumped too much in last 5/30 minutes."""
@@ -1454,6 +1676,11 @@ class TradingManager:
             if pump_pct < pump_threshold:
                 return True
 
+            avoid_top = float(limits.get("avoid_top_pct") or 0.0)
+            if avoid_top > 0 and max_high > 0:
+                if current >= max_high * (1 - avoid_top / 100.0):
+                    return False
+
             atr = self._latest_atr(cur, symbol)
             pullback_abs = 0.0
             pullback_atr_mult = float(limits.get("pullback_atr_mult") or 0.0)
@@ -1504,6 +1731,11 @@ class TradingManager:
             pump_pct = (max_high - min_low) / min_low * 100.0
             if pump_pct < pump_threshold:
                 return True
+
+            avoid_top = float(limits.get("avoid_top_pct") or 0.0)
+            if avoid_top > 0 and max_high > 0:
+                if current >= max_high * (1 - avoid_top / 100.0):
+                    return False
 
             # Compute a simple ATR from recent live candles (last 14)
             atr = None
@@ -1581,6 +1813,34 @@ class TradingManager:
         closes = [float(c[4]) for c in candles if c and len(c) > 4]
         if not closes or len(closes) < 30:
             logging.warning(f"Live entry blocked for {symbol}: insufficient close data")
+            return False
+        # Live trend filter using fresh EMA values
+        ema25 = self._ema(closes, 25)
+        ema7 = self._ema(closes, 7)
+        if self.intraday_trend_filter != "none":
+            if ema25 is None or ema25 <= 0:
+                logging.warning(f"Live entry blocked for {symbol}: missing EMA25")
+                return False
+            if self.intraday_trend_filter == "ema25" and live_price < ema25:
+                logging.info(f"Live entry blocked for {symbol}: price below EMA25")
+                return False
+            if self.intraday_trend_filter == "ema7_ema25":
+                if ema7 is None or ema7 <= ema25:
+                    logging.info(f"Live entry blocked for {symbol}: EMA7 <= EMA25")
+                    return False
+            # Optional slope check
+            lookback = max(2, int(self.intraday_trend_slope_lookback or 0))
+            slope_min = float(self.intraday_trend_slope_min or 0.0)
+            if lookback > 1 and slope_min >= 0 and len(closes) > lookback:
+                ema_prev = self._ema(closes[:-lookback], 25)
+                if ema_prev and ema_prev > 0:
+                    slope_pct = (ema25 - ema_prev) / ema_prev * 100.0
+                    if slope_pct < slope_min:
+                        logging.info(f"Live entry blocked for {symbol}: EMA25 slope {slope_pct:.3f}% < {slope_min}%")
+                        return False
+        # Bearish pattern block using live candles
+        if self._intraday_bearish_block_live(candles, live_price):
+            logging.info(f"Live entry blocked for {symbol}: bearish pattern (live)")
             return False
         # Always apply recent pump block using live candles
         if not self._intraday_recent_pump_ok_live(closes):
@@ -1675,7 +1935,15 @@ class TradingManager:
         stop_price = None
         if not self.intraday_disable_stop and stop_pct and stop_pct > 0:
             stop_price = price * (1 - stop_pct / 100.0)
-        tp_price = price * (1 + profit_pct / 100.0)
+        # Add fee buffer so a "0.5%" target can still net profit after fees.
+        effective_profit = float(profit_pct or 0) + float(self.intraday_fee_buffer_pct or 0)
+        raw_tp = price * (1 + effective_profit / 100.0)
+        tp_price = raw_tp
+        filters = self._get_exchange_filters(symbol)
+        if filters and filters.get("tickSize"):
+            tp_price = self._ceil_to_step(tp_price, filters["tickSize"])
+        if tp_price < raw_tp:
+            tp_price = raw_tp
         if not self.intraday_paper:
             tp_order = self._place_spot_order(
                 symbol,
@@ -1719,7 +1987,9 @@ class TradingManager:
             self._q("INSERT INTO trade_logs(symbol, side, qty, price, pnl, balance_after, reason, status) VALUES (?, 'BUY', ?, ?, 0, ?, ?, 'OPEN')"),
             (symbol, qty, price, new_cash, "intraday_entry"),
         )
-        logging.info(f"Intraday BUY {symbol} qty={qty:.6f} price={price} tp={tp_price} stop={stop_price}")
+        logging.info(
+            f"Intraday BUY {symbol} qty={qty:.6f} price={price} tp={tp_price} stop={stop_price} profit%={profit_pct} eff%={effective_profit}"
+        )
         return True
 
     def _intraday_open_positions(self, cur) -> List[dict]:
@@ -1763,6 +2033,25 @@ class TradingManager:
                         dirty = True
                     else:
                         tp_order_active = True
+            # Downtrend loss exit (cancel TP and market sell)
+            if self._intraday_trend_exit(cur, pos, price):
+                if not self.intraday_paper and pos.get("tp_order_id"):
+                    cancel = self._cancel_spot_order(pos["symbol"], pos["tp_order_id"])
+                    if cancel:
+                        cur.execute(self._q("UPDATE paper_positions SET tp_order_id = NULL, tp_order_status = ? WHERE id = ?"), ("CANCELED", pos["id"]))
+                        dirty = True
+                self._close_position(cur, pos, price, "intraday_trend_exit")
+                dirty = True
+                continue
+            if self._intraday_loss_exit(cur, pos, price):
+                if not self.intraday_paper and pos.get("tp_order_id"):
+                    cancel = self._cancel_spot_order(pos["symbol"], pos["tp_order_id"])
+                    if cancel:
+                        cur.execute(self._q("UPDATE paper_positions SET tp_order_id = NULL, tp_order_status = ? WHERE id = ?"), ("CANCELED", pos["id"]))
+                        dirty = True
+                self._close_position(cur, pos, price, "intraday_loss_exit")
+                dirty = True
+                continue
             if not self.intraday_disable_stop and pos["stop_price"] is not None:
                 if price <= float(pos["stop_price"]):
                     if not self.intraday_paper and pos.get("tp_order_id"):
@@ -1851,6 +2140,8 @@ class TradingManager:
                     if not self._intraday_cooldown_ok(symbol):
                         continue
                     if not self._intraday_trend_ok(cur, symbol, price):
+                        continue
+                    if self._intraday_bearish_block(cur, symbol, price):
                         continue
                     if not self._intraday_volume_ok(cur, symbol):
                         continue

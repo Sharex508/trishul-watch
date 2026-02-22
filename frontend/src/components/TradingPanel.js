@@ -45,6 +45,8 @@ export default function TradingPanel({ selectedSymbol }) {
   const [symbolQuery, setSymbolQuery] = useState('');
   const [intradayAmount, setIntradayAmount] = useState('');
   const [intradayTrades, setIntradayTrades] = useState('');
+  const [intradayProfit, setIntradayProfit] = useState('');
+  const [intradayAvoidTop, setIntradayAvoidTop] = useState('');
   const [intradayPumpPullback, setIntradayPumpPullback] = useState(false);
   const [intradayTradesFilter, setIntradayTradesFilter] = useState(true);
   const [intradayMinTrades, setIntradayMinTrades] = useState('50');
@@ -82,6 +84,8 @@ export default function TradingPanel({ selectedSymbol }) {
       if (json && typeof json === 'object') {
         if (json.amount !== undefined) setIntradayAmount(json.amount);
         if (json.number_of_trades !== undefined) setIntradayTrades(json.number_of_trades);
+        if (json.profit !== undefined) setIntradayProfit(json.profit);
+        if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
         if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
         if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
         if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
@@ -227,6 +231,8 @@ export default function TradingPanel({ selectedSymbol }) {
       const payload = {
         amount: intradayAmount === '' ? undefined : Number(intradayAmount),
         number_of_trades: intradayTrades === '' ? undefined : Number(intradayTrades),
+        profit: intradayProfit === '' ? undefined : Number(intradayProfit),
+        avoid_top_pct: intradayAvoidTop === '' ? undefined : Number(intradayAvoidTop),
         pump_pullback_enabled: intradayPumpPullback ? 1 : 0,
         trades_filter_enabled: intradayTradesFilter ? 1 : 0,
         min_trades_1m: intradayMinTrades === '' ? undefined : Number(intradayMinTrades),
@@ -240,6 +246,8 @@ export default function TradingPanel({ selectedSymbol }) {
       const json = await res.json();
       if (json.amount !== undefined) setIntradayAmount(json.amount);
       if (json.number_of_trades !== undefined) setIntradayTrades(json.number_of_trades);
+      if (json.profit !== undefined) setIntradayProfit(json.profit);
+      if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
       if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
       if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
       if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
@@ -341,6 +349,22 @@ export default function TradingPanel({ selectedSymbol }) {
                 value={intradayTrades}
                 onChange={(e) => setIntradayTrades(e.target.value)}
                 placeholder="Max open trades (0 = unlimited)"
+              />
+              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Take profit % (net)</label>
+              <input
+                type="number"
+                className="overlay-input"
+                value={intradayProfit}
+                onChange={(e) => setIntradayProfit(e.target.value)}
+                placeholder="e.g. 0.5"
+              />
+              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Avoid top %</label>
+              <input
+                type="number"
+                className="overlay-input"
+                value={intradayAvoidTop}
+                onChange={(e) => setIntradayAvoidTop(e.target.value)}
+                placeholder="e.g. 1.0"
               />
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 <input
