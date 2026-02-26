@@ -108,6 +108,9 @@ class TradingManager:
             "bounce_pct": float(os.getenv("INTRADAY_BOUNCE_PCT", "0.3")),
             "bounce_lookback": int(os.getenv("INTRADAY_BOUNCE_LOOKBACK", "5")),
             "avoid_top_pct": float(os.getenv("INTRADAY_AVOID_TOP_PCT", "1.0")),
+            "near_low_enabled": 1 if os.getenv("INTRADAY_NEAR_LOW_ENABLED", "true").lower() == "true" else 0,
+            "near_low_pct": float(os.getenv("INTRADAY_NEAR_LOW_PCT", "1.2")),
+            "near_low_bounce_pct": float(os.getenv("INTRADAY_NEAR_LOW_BOUNCE_PCT", "0.3")),
             "trades_filter_enabled": 1 if os.getenv("INTRADAY_TRADES_FILTER_ENABLED", "true").lower() == "true" else 0,
             "min_trades_1m": int(os.getenv("INTRADAY_MIN_TRADES_1M", "50")),
         }
@@ -1121,8 +1124,9 @@ class TradingManager:
                         margin3count, margin5count, margin10count, margin20count,
                         profit, stoploss, stoploss_limit, amount, number_of_trades,
                         pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult,
-                        bounce_pct, bounce_lookback, avoid_top_pct, trades_filter_enabled, min_trades_1m
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bounce_pct, bounce_lookback, avoid_top_pct, near_low_enabled, near_low_pct, near_low_bounce_pct,
+                        trades_filter_enabled, min_trades_1m
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 ),
                 (
@@ -1142,6 +1146,9 @@ class TradingManager:
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
                     self.intraday_default_limits["avoid_top_pct"],
+                    self.intraday_default_limits["near_low_enabled"],
+                    self.intraday_default_limits["near_low_pct"],
+                    self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1154,7 +1161,8 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, trades_filter_enabled = ?, min_trades_1m = ?
+                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, near_low_enabled = ?, near_low_pct = ?, near_low_bounce_pct = ?,
+                        trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -1174,6 +1182,9 @@ class TradingManager:
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
                     self.intraday_default_limits["avoid_top_pct"],
+                    self.intraday_default_limits["near_low_enabled"],
+                    self.intraday_default_limits["near_low_pct"],
+                    self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1227,13 +1238,16 @@ class TradingManager:
                 "bounce_pct",
                 "bounce_lookback",
                 "avoid_top_pct",
+                "near_low_enabled",
+                "near_low_pct",
+                "near_low_bounce_pct",
                 "trades_filter_enabled",
                 "min_trades_1m",
             ]:
                 if key in updates and updates[key] is not None:
                     try:
                         val = updates[key]
-                        if key in ("pump_pullback_enabled", "bounce_lookback", "trades_filter_enabled", "min_trades_1m") or key.endswith("count") or key == "number_of_trades":
+                        if key in ("pump_pullback_enabled", "bounce_lookback", "trades_filter_enabled", "min_trades_1m", "near_low_enabled") or key.endswith("count") or key == "number_of_trades":
                             self.intraday_default_limits[key] = int(val)
                         else:
                             self.intraday_default_limits[key] = float(val)
@@ -1247,7 +1261,8 @@ class TradingManager:
                     SET margin3count = ?, margin5count = ?, margin10count = ?, margin20count = ?,
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
-                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, trades_filter_enabled = ?, min_trades_1m = ?
+                        bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, near_low_enabled = ?, near_low_pct = ?, near_low_bounce_pct = ?,
+                        trades_filter_enabled = ?, min_trades_1m = ?
                     """
                 ),
                 (
@@ -1267,6 +1282,9 @@ class TradingManager:
                     self.intraday_default_limits["bounce_pct"],
                     self.intraday_default_limits["bounce_lookback"],
                     self.intraday_default_limits["avoid_top_pct"],
+                    self.intraday_default_limits["near_low_enabled"],
+                    self.intraday_default_limits["near_low_pct"],
+                    self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
                 ),
@@ -1290,7 +1308,7 @@ class TradingManager:
             """
             SELECT margin3count, margin5count, margin10count, margin20count, profit, stoploss, stoploss_limit, amount, number_of_trades,
                    pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult, bounce_pct, bounce_lookback,
-                   avoid_top_pct, trades_filter_enabled, min_trades_1m
+                   avoid_top_pct, near_low_enabled, near_low_pct, near_low_bounce_pct, trades_filter_enabled, min_trades_1m
             FROM intraday_limits
             LIMIT 1
             """
@@ -1315,8 +1333,11 @@ class TradingManager:
             "bounce_pct": float(row[13] or 0.0),
             "bounce_lookback": int(row[14] or 0),
             "avoid_top_pct": float(row[15] or 0.0),
-            "trades_filter_enabled": int(row[16] or 0),
-            "min_trades_1m": int(row[17] or 0),
+            "near_low_enabled": int(row[16] or 0),
+            "near_low_pct": float(row[17] or 0.0),
+            "near_low_bounce_pct": float(row[18] or 0.0),
+            "trades_filter_enabled": int(row[19] or 0),
+            "min_trades_1m": int(row[20] or 0),
         }
 
     def _intraday_counts(self, cur) -> dict:
@@ -1443,6 +1464,30 @@ class TradingManager:
             if len(opens) < 5 or len(closes) < 5:
                 return False
             return self._intraday_bearish_pattern_from_ohlc(opens, closes, price, lookback)
+        except Exception:
+            return False
+
+    def _intraday_near_low_ok_live(self, candles: List[list], price: float, limits: dict) -> bool:
+        try:
+            if not limits.get("near_low_enabled"):
+                return True
+            near_pct = float(limits.get("near_low_pct") or 0.0)
+            bounce_pct = float(limits.get("near_low_bounce_pct") or 0.0)
+            if near_pct <= 0 and bounce_pct <= 0:
+                return True
+            chron = list(reversed(candles))  # oldest -> newest
+            recent = chron[-30:] if len(chron) >= 30 else chron
+            lows = [float(c[3]) for c in recent if c and len(c) > 3]
+            if len(lows) < 5:
+                return False
+            recent_low = min(lows)
+            if recent_low <= 0 or price <= 0:
+                return False
+            if near_pct > 0 and price > recent_low * (1 + near_pct / 100.0):
+                return False
+            if bounce_pct > 0 and price < recent_low * (1 + bounce_pct / 100.0):
+                return False
+            return True
         except Exception:
             return False
 
@@ -1649,6 +1694,38 @@ class TradingManager:
         except Exception:
             return False
 
+    def _intraday_near_low_ok(self, cur, symbol: str, price: float, limits: dict) -> bool:
+        """Require price to be near the recent low and bounced off it."""
+        try:
+            if not limits.get("near_low_enabled"):
+                return True
+            near_pct = float(limits.get("near_low_pct") or 0.0)
+            bounce_pct = float(limits.get("near_low_bounce_pct") or 0.0)
+            if near_pct <= 0 and bounce_pct <= 0:
+                return True
+            cur.execute(
+                self._q("SELECT low FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 30"),
+                (symbol, "1m"),
+            )
+            rows = cur.fetchall()
+            lows = [float(r[0]) for r in rows if r and r[0] is not None]
+            if len(lows) < 5:
+                return False
+            recent_low = min(lows)
+            if recent_low <= 0 or price <= 0:
+                return False
+            # Price must be within near_low_pct above the low
+            if near_pct > 0:
+                if price > recent_low * (1 + near_pct / 100.0):
+                    return False
+            # And it must have bounced at least bounce_pct above the low
+            if bounce_pct > 0:
+                if price < recent_low * (1 + bounce_pct / 100.0):
+                    return False
+            return True
+        except Exception:
+            return False
+
     def _intraday_pump_pullback_ok(self, cur, symbol: str, limits: dict) -> bool:
         """If a coin pumped, require a pullback + bounce before allowing a buy."""
         try:
@@ -1841,6 +1918,10 @@ class TradingManager:
         # Bearish pattern block using live candles
         if self._intraday_bearish_block_live(candles, live_price):
             logging.info(f"Live entry blocked for {symbol}: bearish pattern (live)")
+            return False
+        # Require near-low + bounce if enabled
+        if not self._intraday_near_low_ok_live(candles, live_price, limits):
+            logging.info(f"Live entry blocked for {symbol}: not near low + bounce (live)")
             return False
         # Always apply recent pump block using live candles
         if not self._intraday_recent_pump_ok_live(closes):
@@ -2116,6 +2197,13 @@ class TradingManager:
                     continue
 
                 counts = self._intraday_counts(cur)
+                max_mar3 = int(limits.get("margin3count") or 0)
+                max_mar5 = int(limits.get("margin5count") or 0)
+                max_mar10 = int(limits.get("margin10count") or 0)
+                max_mar20 = int(limits.get("margin20count") or 0)
+                if unlimited_trades:
+                    # When unlimited, don't cap the number of entries by margin counts.
+                    max_mar3 = max_mar5 = max_mar10 = max_mar20 = 10**9
                 # Build price map once per loop
                 cur.execute("SELECT symbol, latest_price FROM coin_monitor")
                 price_map = {row[0]: float(row[1]) for row in cur.fetchall() if row and row[1] is not None}
@@ -2141,6 +2229,8 @@ class TradingManager:
                         continue
                     if not self._intraday_trend_ok(cur, symbol, price):
                         continue
+                    if not self._intraday_near_low_ok(cur, symbol, price, limits):
+                        continue
                     if self._intraday_bearish_block(cur, symbol, price):
                         continue
                     if not self._intraday_volume_ok(cur, symbol):
@@ -2154,7 +2244,7 @@ class TradingManager:
                         if not self._intraday_recent_pump_ok(cur, symbol):
                             continue
 
-                    if counts["sum_mar3"] < limits["margin3count"]:
+                    if counts["sum_mar3"] < max_mar3:
                         if price >= float(margin3 or 0) and not mar3:
                             if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
@@ -2162,7 +2252,7 @@ class TradingManager:
                                 open_count += 1
                             continue
 
-                    if counts["sum_mar5"] < limits["margin5count"]:
+                    if counts["sum_mar5"] < max_mar5:
                         if price >= float(margin5 or 0) and not mar5:
                             if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar5 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
@@ -2170,7 +2260,7 @@ class TradingManager:
                                 open_count += 1
                             continue
 
-                    if counts["sum_mar10"] < limits["margin10count"]:
+                    if counts["sum_mar10"] < max_mar10:
                         if price >= float(margin10 or 0) and not mar10:
                             if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar10 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
@@ -2178,7 +2268,7 @@ class TradingManager:
                                 open_count += 1
                             continue
 
-                    if counts["sum_mar20"] < limits["margin20count"]:
+                    if counts["sum_mar20"] < max_mar20:
                         if price >= float(margin20 or 0) and not mar20:
                             if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
                                 cur.execute(self._q("UPDATE intraday_trading SET mar20 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))

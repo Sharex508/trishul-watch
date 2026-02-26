@@ -48,6 +48,9 @@ export default function TradingPanel({ selectedSymbol }) {
   const [intradayProfit, setIntradayProfit] = useState('');
   const [intradayAvoidTop, setIntradayAvoidTop] = useState('');
   const [intradayPumpPullback, setIntradayPumpPullback] = useState(false);
+  const [intradayNearLow, setIntradayNearLow] = useState(true);
+  const [intradayNearLowPct, setIntradayNearLowPct] = useState('1.2');
+  const [intradayNearLowBounce, setIntradayNearLowBounce] = useState('0.3');
   const [intradayTradesFilter, setIntradayTradesFilter] = useState(true);
   const [intradayMinTrades, setIntradayMinTrades] = useState('50');
   const [intradayMsg, setIntradayMsg] = useState('');
@@ -87,6 +90,9 @@ export default function TradingPanel({ selectedSymbol }) {
         if (json.profit !== undefined) setIntradayProfit(json.profit);
         if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
         if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
+        if (json.near_low_enabled !== undefined) setIntradayNearLow(Boolean(json.near_low_enabled));
+        if (json.near_low_pct !== undefined) setIntradayNearLowPct(json.near_low_pct);
+        if (json.near_low_bounce_pct !== undefined) setIntradayNearLowBounce(json.near_low_bounce_pct);
         if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
         if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
       }
@@ -234,6 +240,9 @@ export default function TradingPanel({ selectedSymbol }) {
         profit: intradayProfit === '' ? undefined : Number(intradayProfit),
         avoid_top_pct: intradayAvoidTop === '' ? undefined : Number(intradayAvoidTop),
         pump_pullback_enabled: intradayPumpPullback ? 1 : 0,
+        near_low_enabled: intradayNearLow ? 1 : 0,
+        near_low_pct: intradayNearLowPct === '' ? undefined : Number(intradayNearLowPct),
+        near_low_bounce_pct: intradayNearLowBounce === '' ? undefined : Number(intradayNearLowBounce),
         trades_filter_enabled: intradayTradesFilter ? 1 : 0,
         min_trades_1m: intradayMinTrades === '' ? undefined : Number(intradayMinTrades),
       };
@@ -249,6 +258,9 @@ export default function TradingPanel({ selectedSymbol }) {
       if (json.profit !== undefined) setIntradayProfit(json.profit);
       if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
       if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
+      if (json.near_low_enabled !== undefined) setIntradayNearLow(Boolean(json.near_low_enabled));
+      if (json.near_low_pct !== undefined) setIntradayNearLowPct(json.near_low_pct);
+      if (json.near_low_bounce_pct !== undefined) setIntradayNearLowBounce(json.near_low_bounce_pct);
       if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
       if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
       setIntradayMsg('Intraday limits updated.');
@@ -374,6 +386,32 @@ export default function TradingPanel({ selectedSymbol }) {
                 />
                 Pump→pullback filter (require pullback + bounce after 30m pump)
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={intradayNearLow}
+                  onChange={(e) => setIntradayNearLow(e.target.checked)}
+                />
+                Buy near low + bounce (1m candles)
+              </label>
+              {intradayNearLow && (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <input
+                    type="number"
+                    className="overlay-input"
+                    value={intradayNearLowPct}
+                    onChange={(e) => setIntradayNearLowPct(e.target.value)}
+                    placeholder="Near low % (e.g. 1.2)"
+                  />
+                  <input
+                    type="number"
+                    className="overlay-input"
+                    value={intradayNearLowBounce}
+                    onChange={(e) => setIntradayNearLowBounce(e.target.value)}
+                    placeholder="Bounce from low % (e.g. 0.3)"
+                  />
+                </div>
+              )}
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 <input
                   type="checkbox"
