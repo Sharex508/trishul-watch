@@ -122,9 +122,7 @@ class TradingManager:
         self.intraday_pump_5m_pct = float(os.getenv("INTRADAY_PUMP_5M_PCT", "1.5"))
         self.intraday_pump_30m_pct = float(os.getenv("INTRADAY_PUMP_30M_PCT", "3.0"))
         self.intraday_live_confirm = os.getenv("INTRADAY_LIVE_CONFIRM", "true").lower() == "true"
-        self.intraday_cooldown_sec = int(os.getenv("INTRADAY_COOLDOWN_SEC", "300"))
-        self.intraday_cooldown_flex = os.getenv("INTRADAY_COOLDOWN_FLEX", "true").lower() == "true"
-        self.intraday_strong_score = float(os.getenv("INTRADAY_STRONG_SCORE", "80"))
+        self.intraday_cooldown_sec = int(os.getenv("INTRADAY_COOLDOWN_SEC", "600"))
         self.intraday_loss_exit_pct = float(os.getenv("INTRADAY_LOSS_EXIT_PCT", "2.0"))
         self.intraday_loss_exit_candles = int(os.getenv("INTRADAY_LOSS_EXIT_CANDLES", "5"))
         self.intraday_loss_sell_ratio = float(os.getenv("INTRADAY_LOSS_SELL_RATIO", "1.2"))
@@ -1543,18 +1541,12 @@ class TradingManager:
         except Exception:
             return False
 
-    def _intraday_cooldown_ok(self, symbol: str, score: Optional[float] = None) -> bool:
-        """Block re-entry on the same symbol until cooldown expires, unless strong signal."""
+    def _intraday_cooldown_ok(self, symbol: str) -> bool:
+        """Block re-entry on the same symbol until cooldown expires."""
         try:
             last = self._last_exit_ts.get(symbol)
             if not last:
                 return True
-            if self.intraday_cooldown_flex and score is not None:
-                try:
-                    if float(score) >= float(self.intraday_strong_score or 0):
-                        return True
-                except Exception:
-                    pass
             return (time.time() - float(last)) >= float(self.intraday_cooldown_sec or 0)
         except Exception:
             return True
@@ -1701,99 +1693,6 @@ class TradingManager:
             return True
         except Exception:
             return False
-
-    def _intraday_score(self, cur, symbol: str, price: float, limits: dict) -> Optional[float]:
-        """Score a candidate symbol for intraday entry. Higher = better."""
-        try:
-            score = 0.0
-
-            # Trend + slope
-            cur.execute(
-                self._q("SELECT ema7, ema25, ema_slope FROM features WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 1"),
-                (symbol, "1m"),
-            )
-            row = cur.fetchone()
-            ema7 = float(row[0]) if row and row[0] is not None else None
-            ema25 = float(row[1]) if row and row[1] is not None else None
-            ema_slope = float(row[2]) if row and row[2] is not None else 0.0
-            if ema25 and ema25 > 0:
-                if ema7 and ema7 > ema25:
-                    score += 25.0
-                elif price >= ema25:
-                    score += 15.0
-                slope_pct = (ema_slope / ema25) * 100.0
-                if slope_pct >= 0.01:
-                    score += 10.0
-                elif slope_pct > 0:
-                    score += 5.0
-
-            # Candles-based pullback quality + avoid top
-            cur.execute(
-                self._q("SELECT open, high, low, close, volume FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 30"),
-                (symbol, "1m"),
-            )
-            rows = cur.fetchall()
-            if not rows or len(rows) < 5:
-                return None
-            highs = [float(r[1]) for r in rows if r and r[1] is not None]
-            lows = [float(r[2]) for r in rows if r and r[2] is not None]
-            closes = [float(r[3]) for r in rows if r and r[3] is not None]
-            vols = [float(r[4]) for r in rows if r and r[4] is not None]
-            if not highs or not lows:
-                return None
-            max_high = max(highs)
-            min_low = min(lows)
-            rng = max_high - min_low
-            if rng > 0:
-                pos = (price - min_low) / rng
-                if pos <= 0.25:
-                    score += 20.0
-                elif pos <= 0.4:
-                    score += 15.0
-                elif pos <= 0.6:
-                    score += 8.0
-            bounce_pct = float(limits.get("bounce_pct") or 0.0)
-            if bounce_pct > 0 and min_low > 0 and price >= min_low * (1 + bounce_pct / 100.0):
-                score += 5.0
-            avoid_top = float(limits.get("avoid_top_pct") or 0.0)
-            if avoid_top > 0 and max_high > 0:
-                if price <= max_high * (1 - avoid_top / 100.0):
-                    score += 10.0
-
-            # Volume score
-            if vols:
-                cur_vol = vols[0]
-                avg_vol = sum(vols[:20]) / min(20, len(vols)) if len(vols) >= 1 else 0.0
-                if avg_vol and avg_vol > 0:
-                    ratio = cur_vol / avg_vol
-                    if ratio >= 1.5:
-                        score += 15.0
-                    elif ratio >= 1.0:
-                        score += 10.0
-                    elif ratio >= 0.8:
-                        score += 6.0
-
-            # Trades activity score
-            cur.execute(
-                self._q("SELECT buy_count, sell_count FROM orderflow WHERE symbol = ? ORDER BY ts DESC LIMIT 1"),
-                (symbol,),
-            )
-            row = cur.fetchone()
-            if row:
-                total = float(row[0] or 0) + float(row[1] or 0)
-                min_trades = float(limits.get("min_trades_1m") or 30)
-                if min_trades <= 0:
-                    min_trades = 30.0
-                if total >= min_trades * 2:
-                    score += 10.0
-                elif total >= min_trades:
-                    score += 7.0
-                elif total >= min_trades * 0.6:
-                    score += 4.0
-
-            return round(score, 2)
-        except Exception:
-            return None
 
     def _intraday_near_low_ok(self, cur, symbol: str, price: float, limits: dict) -> bool:
         """Require price to be near the recent low and bounced off it."""
@@ -2317,7 +2216,6 @@ class TradingManager:
                     """
                 )
                 rows = cur.fetchall()
-                candidates = []
                 for row in rows:
                     if open_count >= trades_count:
                         break
@@ -2326,6 +2224,8 @@ class TradingManager:
                     if price is None:
                         continue
                     if symbol in open_symbols:
+                        continue
+                    if not self._intraday_cooldown_ok(symbol):
                         continue
                     if not self._intraday_trend_ok(cur, symbol, price):
                         continue
@@ -2344,56 +2244,37 @@ class TradingManager:
                         if not self._intraday_recent_pump_ok(cur, symbol):
                             continue
 
-                    tier = None
-                    if price >= float(margin3 or 0) and not mar3:
-                        tier = "mar3"
-                    elif price >= float(margin5 or 0) and not mar5:
-                        tier = "mar5"
-                    elif price >= float(margin10 or 0) and not mar10:
-                        tier = "mar10"
-                    elif price >= float(margin20 or 0) and not mar20:
-                        tier = "mar20"
-                    if not tier:
-                        continue
+                    if counts["sum_mar3"] < max_mar3:
+                        if price >= float(margin3 or 0) and not mar3:
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
+                                cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
+                                counts["sum_mar3"] += 1
+                                open_count += 1
+                            continue
 
-                    score = self._intraday_score(cur, symbol, price, limits)
-                    if score is None:
-                        continue
-                    if not self._intraday_cooldown_ok(symbol, score):
-                        continue
-                    candidates.append((score, symbol, price, tier))
+                    if counts["sum_mar5"] < max_mar5:
+                        if price >= float(margin5 or 0) and not mar5:
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
+                                cur.execute(self._q("UPDATE intraday_trading SET mar5 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
+                                counts["sum_mar5"] += 1
+                                open_count += 1
+                            continue
 
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                slots = trades_count - open_count
-                if unlimited_trades:
-                    slots = len(candidates)
-                for score, symbol, price, tier in candidates[:max(0, slots)]:
-                    if not unlimited_trades and open_count >= trades_count:
-                        break
-                    if tier == "mar3" and counts["sum_mar3"] < max_mar3:
-                        if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                            cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                            counts["sum_mar3"] += 1
-                            open_count += 1
-                        continue
-                    if tier == "mar5" and counts["sum_mar5"] < max_mar5:
-                        if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                            cur.execute(self._q("UPDATE intraday_trading SET mar5 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                            counts["sum_mar5"] += 1
-                            open_count += 1
-                        continue
-                    if tier == "mar10" and counts["sum_mar10"] < max_mar10:
-                        if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                            cur.execute(self._q("UPDATE intraday_trading SET mar10 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                            counts["sum_mar10"] += 1
-                            open_count += 1
-                        continue
-                    if tier == "mar20" and counts["sum_mar20"] < max_mar20:
-                        if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                            cur.execute(self._q("UPDATE intraday_trading SET mar20 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                            counts["sum_mar20"] += 1
-                            open_count += 1
-                        continue
+                    if counts["sum_mar10"] < max_mar10:
+                        if price >= float(margin10 or 0) and not mar10:
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
+                                cur.execute(self._q("UPDATE intraday_trading SET mar10 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
+                                counts["sum_mar10"] += 1
+                                open_count += 1
+                            continue
+
+                    if counts["sum_mar20"] < max_mar20:
+                        if price >= float(margin20 or 0) and not mar20:
+                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
+                                cur.execute(self._q("UPDATE intraday_trading SET mar20 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
+                                counts["sum_mar20"] += 1
+                                open_count += 1
+                            continue
 
                 conn.commit()
                 try:
