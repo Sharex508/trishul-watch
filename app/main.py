@@ -74,6 +74,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class AddCoinRequest(BaseModel):
+    symbol: str
+
+class TradeRequest(BaseModel):
+    symbol: str
+    amount: float
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+
+class BinanceCredentialsRequest(BaseModel):
+    api_key: str
+    api_secret: str
+
+class EntryPlanRequest(BaseModel):
+    zone_id: int
+    balance: float = 1000.0
+    risk_perc: float = 1.0
+    rr_target: float = 2.0
+
 # Background task for updating coin prices
 price_monitor_thread = None
 
@@ -335,7 +354,6 @@ def get_coin_recent_trades(symbol: str):
             "binance_link": f"https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')}"
         }
 
-
 @app.get("/api/trade-activity", response_model=list)
 def api_trade_activity(limit: int = Query(50, ge=1, le=200), max_age_sec: int = Query(120, ge=10, le=600)):
     """
@@ -394,22 +412,6 @@ def api_trade_activity(limit: int = Query(50, ge=1, le=200), max_age_sec: int = 
                 conn.close()
         except Exception:
             pass
-
-class AddCoinRequest(BaseModel):
-    symbol: str
-
-class TradeRequest(BaseModel):
-    symbol: str
-    amount: float
-    api_key: Optional[str] = None
-    api_secret: Optional[str] = None
-
-class EntryPlanRequest(BaseModel):
-    zone_id: int
-    balance: float = 1000.0
-    risk_perc: float = 1.0
-    rr_target: float = 2.0
-
 @app.post("/api/coin-monitors/add", response_model=dict)
 def add_new_coin(request: AddCoinRequest = Body(...)):
     """

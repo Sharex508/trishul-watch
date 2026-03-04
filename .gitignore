@@ -45,6 +45,7 @@ venv.bak/
 # Docker
 .docker/
 .buildcache/
+.git_backup_*/
 
 # Node.js
 node_modules/

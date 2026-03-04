@@ -47,6 +47,7 @@ services:
       INTRADAY_DISABLE_STOP: 'true'
       INTRADAY_STOPLOSS_PCT: '0'
       INTRADAY_STOPLOSS_LIMIT_PCT: '0'
+      INTRADAY_MARGIN3_COUNT: '100'
       INTRADAY_SYNC_LIMITS: 'true'
     ports:
       - "8000:8000"
