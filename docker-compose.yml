@@ -1,0 +1,78 @@
+# Enable BuildKit by default
+x-build-args: &build-args
+  DOCKER_BUILDKIT: 1
+  BUILDKIT_PROGRESS: plain
+  BUILDKIT_INLINE_CACHE: 1
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: coin_monitor
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./app/create_tables.sql:/docker-entrypoint-initdb.d/create_tables.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      args:
+        <<: *build-args
+      # Cache from previous builds (disabled until cache is properly initialized)
+      # cache_from:
+      #   - type=local,src=./.buildcache/api
+      cache_to:
+        - type=local,dest=./.buildcache/api,mode=max
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: coin_monitor
+      DB_PORT: 5432
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: 'False'
+      INTRADAY_DISABLE_STOP: 'true'
+      INTRADAY_STOPLOSS_PCT: '0'
+      INTRADAY_STOPLOSS_LIMIT_PCT: '0'
+      INTRADAY_MARGIN3_COUNT: '100'
+      INTRADAY_SYNC_LIMITS: 'true'
+    ports:
+      - "8000:8000"
+    command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect(('localhost', 8000)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    # For development, mount source code for hot reloading
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+
+volumes:
+  postgres-data:

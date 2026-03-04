@@ -1,0 +1,92 @@
+.admin-panel {
+  background-color: #1e2130;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+  color: #ffffff;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.admin-panel h2 {
+  margin-top: 0;
+  color: #61dafb;
+  border-bottom: 1px solid #61dafb;
+  padding-bottom: 10px;
+  margin-bottom: 20px;
+}
+
+.admin-panel h3 {
+  color: #61dafb;
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+
+.credentials-section, .refresh-section {
+  margin-bottom: 30px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: bold;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background-color: #2c3040;
+  color: #fff;
+  font-size: 14px;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: #61dafb;
+  box-shadow: 0 0 0 2px rgba(97, 218, 251, 0.2);
+}
+
+.save-button, .refresh-button {
+  background-color: #61dafb;
+  color: #1e2130;
+  border: none;
+  border-radius: 4px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.save-button:hover, .refresh-button:hover {
+  background-color: #4fa8c7;
+}
+
+.save-button:disabled, .refresh-button:disabled {
+  background-color: #444;
+  cursor: not-allowed;
+}
+
+.message {
+  padding: 10px 15px;
+  border-radius: 4px;
+  margin-top: 20px;
+  font-weight: bold;
+}
+
+.message.success {
+  background-color: rgba(46, 204, 113, 0.2);
+  border: 1px solid #2ecc71;
+  color: #2ecc71;
+}
+
+.message.error {
+  background-color: rgba(231, 76, 60, 0.2);
+  border: 1px solid #e74c3c;
+  color: #e74c3c;
+}
