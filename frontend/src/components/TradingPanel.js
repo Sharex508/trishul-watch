@@ -48,11 +48,13 @@ export default function TradingPanel({ selectedSymbol }) {
   const [intradayProfit, setIntradayProfit] = useState('');
   const [intradayAvoidTop, setIntradayAvoidTop] = useState('');
   const [intradayPumpPullback, setIntradayPumpPullback] = useState(false);
-  const [intradayNearLow, setIntradayNearLow] = useState(true);
   const [intradayNearLowPct, setIntradayNearLowPct] = useState('1.2');
   const [intradayNearLowBounce, setIntradayNearLowBounce] = useState('0.3');
   const [intradayTradesFilter, setIntradayTradesFilter] = useState(true);
   const [intradayMinTrades, setIntradayMinTrades] = useState('50');
+  const [intradayBuyPressureRatio, setIntradayBuyPressureRatio] = useState('1.1');
+  const [intradayBuyPressureWindow, setIntradayBuyPressureWindow] = useState('2');
+  const [intradayMaxSessionTrades, setIntradayMaxSessionTrades] = useState('100');
   const [intradayMsg, setIntradayMsg] = useState('');
 
   // Load persisted preferences
@@ -90,11 +92,13 @@ export default function TradingPanel({ selectedSymbol }) {
         if (json.profit !== undefined) setIntradayProfit(json.profit);
         if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
         if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
-        if (json.near_low_enabled !== undefined) setIntradayNearLow(Boolean(json.near_low_enabled));
         if (json.near_low_pct !== undefined) setIntradayNearLowPct(json.near_low_pct);
         if (json.near_low_bounce_pct !== undefined) setIntradayNearLowBounce(json.near_low_bounce_pct);
         if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
         if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
+        if (json.buy_pressure_ratio !== undefined) setIntradayBuyPressureRatio(json.buy_pressure_ratio);
+        if (json.buy_pressure_window !== undefined) setIntradayBuyPressureWindow(json.buy_pressure_window);
+        if (json.max_session_trades !== undefined) setIntradayMaxSessionTrades(json.max_session_trades);
       }
     } catch (e) {
       // ignore
@@ -240,11 +244,14 @@ export default function TradingPanel({ selectedSymbol }) {
         profit: intradayProfit === '' ? undefined : Number(intradayProfit),
         avoid_top_pct: intradayAvoidTop === '' ? undefined : Number(intradayAvoidTop),
         pump_pullback_enabled: intradayPumpPullback ? 1 : 0,
-        near_low_enabled: intradayNearLow ? 1 : 0,
+        near_low_enabled: 1,
         near_low_pct: intradayNearLowPct === '' ? undefined : Number(intradayNearLowPct),
         near_low_bounce_pct: intradayNearLowBounce === '' ? undefined : Number(intradayNearLowBounce),
         trades_filter_enabled: intradayTradesFilter ? 1 : 0,
         min_trades_1m: intradayMinTrades === '' ? undefined : Number(intradayMinTrades),
+        buy_pressure_ratio: intradayBuyPressureRatio === '' ? undefined : Number(intradayBuyPressureRatio),
+        buy_pressure_window: intradayBuyPressureWindow === '' ? undefined : Number(intradayBuyPressureWindow),
+        max_session_trades: intradayMaxSessionTrades === '' ? undefined : Number(intradayMaxSessionTrades),
       };
       const res = await fetch(`${API_URL}/api/trading/intraday-limits`, {
         method: 'POST',
@@ -258,11 +265,13 @@ export default function TradingPanel({ selectedSymbol }) {
       if (json.profit !== undefined) setIntradayProfit(json.profit);
       if (json.avoid_top_pct !== undefined) setIntradayAvoidTop(json.avoid_top_pct);
       if (json.pump_pullback_enabled !== undefined) setIntradayPumpPullback(Boolean(json.pump_pullback_enabled));
-      if (json.near_low_enabled !== undefined) setIntradayNearLow(Boolean(json.near_low_enabled));
       if (json.near_low_pct !== undefined) setIntradayNearLowPct(json.near_low_pct);
       if (json.near_low_bounce_pct !== undefined) setIntradayNearLowBounce(json.near_low_bounce_pct);
       if (json.trades_filter_enabled !== undefined) setIntradayTradesFilter(Boolean(json.trades_filter_enabled));
       if (json.min_trades_1m !== undefined) setIntradayMinTrades(json.min_trades_1m);
+      if (json.buy_pressure_ratio !== undefined) setIntradayBuyPressureRatio(json.buy_pressure_ratio);
+      if (json.buy_pressure_window !== undefined) setIntradayBuyPressureWindow(json.buy_pressure_window);
+      if (json.max_session_trades !== undefined) setIntradayMaxSessionTrades(json.max_session_trades);
       setIntradayMsg('Intraday limits updated.');
     } catch (e) {
       setError(e.message || String(e));
@@ -354,13 +363,13 @@ export default function TradingPanel({ selectedSymbol }) {
                 onChange={(e) => setIntradayAmount(e.target.value)}
                 placeholder="e.g. 100"
               />
-              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Number of trades</label>
+              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Max parallel trades</label>
               <input
                 type="number"
                 className="overlay-input"
                 value={intradayTrades}
                 onChange={(e) => setIntradayTrades(e.target.value)}
-                placeholder="Max open trades (0 = unlimited)"
+                placeholder="How many coins can stay open together"
               />
               <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Take profit % (net)</label>
               <input
@@ -370,64 +379,66 @@ export default function TradingPanel({ selectedSymbol }) {
                 onChange={(e) => setIntradayProfit(e.target.value)}
                 placeholder="e.g. 0.5"
               />
-              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Avoid top %</label>
+              <label style={{ display: 'block', fontSize: 13, color: '#9ca3af' }}>Max session trades</label>
               <input
                 type="number"
                 className="overlay-input"
-                value={intradayAvoidTop}
-                onChange={(e) => setIntradayAvoidTop(e.target.value)}
-                placeholder="e.g. 1.0"
+                value={intradayMaxSessionTrades}
+                onChange={(e) => setIntradayMaxSessionTrades(e.target.value)}
+                placeholder="Completed buy->sell cycles after Start"
               />
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <div style={{ fontSize: 12, color: '#9ca3af' }}>
+                Session cycles completed: {Number(status.intraday_session_completed_trades || 0)} / {intradayMaxSessionTrades || 'unlimited'}
+              </div>
+              <div style={{ fontSize: 13, color: '#e5e7eb' }}>Rebound from recent low (required)</div>
+              <div style={{ display: 'grid', gap: 6 }}>
                 <input
-                  type="checkbox"
-                  checked={intradayPumpPullback}
-                  onChange={(e) => setIntradayPumpPullback(e.target.checked)}
+                  type="number"
+                  className="overlay-input"
+                  value={intradayNearLowPct}
+                  onChange={(e) => setIntradayNearLowPct(e.target.value)}
+                  placeholder="Near low % (e.g. 1.2)"
                 />
-                Pump→pullback filter (require pullback + bounce after 30m pump)
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 <input
-                  type="checkbox"
-                  checked={intradayNearLow}
-                  onChange={(e) => setIntradayNearLow(e.target.checked)}
+                  type="number"
+                  className="overlay-input"
+                  value={intradayNearLowBounce}
+                  onChange={(e) => setIntradayNearLowBounce(e.target.value)}
+                  placeholder="Bounce from low % (e.g. 0.3)"
                 />
-                Buy near low + bounce (1m candles)
-              </label>
-              {intradayNearLow && (
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <input
-                    type="number"
-                    className="overlay-input"
-                    value={intradayNearLowPct}
-                    onChange={(e) => setIntradayNearLowPct(e.target.value)}
-                    placeholder="Near low % (e.g. 1.2)"
-                  />
-                  <input
-                    type="number"
-                    className="overlay-input"
-                    value={intradayNearLowBounce}
-                    onChange={(e) => setIntradayNearLowBounce(e.target.value)}
-                    placeholder="Bounce from low % (e.g. 0.3)"
-                  />
-                </div>
-              )}
+              </div>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 <input
                   type="checkbox"
                   checked={intradayTradesFilter}
                   onChange={(e) => setIntradayTradesFilter(e.target.checked)}
                 />
-                Min trades in last 1m (default 50)
+                Buy pressure + activity check
               </label>
               {intradayTradesFilter && (
-                <input
-                  type="number"
-                  className="overlay-input"
-                  value={intradayMinTrades}
-                  onChange={(e) => setIntradayMinTrades(e.target.value)}
-                  placeholder="e.g. 50"
-                />
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <input
+                    type="number"
+                    className="overlay-input"
+                    value={intradayMinTrades}
+                    onChange={(e) => setIntradayMinTrades(e.target.value)}
+                    placeholder="Minimum total trades across recent orderflow"
+                  />
+                  <input
+                    type="number"
+                    className="overlay-input"
+                    value={intradayBuyPressureRatio}
+                    onChange={(e) => setIntradayBuyPressureRatio(e.target.value)}
+                    placeholder="Buy volume ratio vs sells (e.g. 1.1)"
+                  />
+                  <input
+                    type="number"
+                    className="overlay-input"
+                    value={intradayBuyPressureWindow}
+                    onChange={(e) => setIntradayBuyPressureWindow(e.target.value)}
+                    placeholder="Recent orderflow snapshots to watch"
+                  />
+                </div>
               )}
               <button disabled={busy} onClick={saveIntradayLimits} className="admin-button">Update intraday limits</button>
               {intradayMsg && <div style={{ color: '#22c55e', fontSize: 12 }}>{intradayMsg}</div>}

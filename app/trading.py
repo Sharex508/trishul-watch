@@ -86,6 +86,8 @@ class TradingManager:
         self.intraday_thread: Optional[threading.Thread] = None
         self._intraday_stop = threading.Event()
         self.intraday_enabled: bool = False
+        self.intraday_session_completed_trades: int = 0
+        self.intraday_session_started_at: Optional[float] = None
         self.intraday_loop_sec = float(os.getenv("INTRADAY_LOOP_SEC", "10"))
         self.intraday_margin3_pct = float(os.getenv("INTRADAY_MARGIN3_PCT", "0.5"))
         self.intraday_margin5_pct = float(os.getenv("INTRADAY_MARGIN5_PCT", "5"))
@@ -113,14 +115,23 @@ class TradingManager:
             "near_low_bounce_pct": float(os.getenv("INTRADAY_NEAR_LOW_BOUNCE_PCT", "0.3")),
             "trades_filter_enabled": 1 if os.getenv("INTRADAY_TRADES_FILTER_ENABLED", "true").lower() == "true" else 0,
             "min_trades_1m": int(os.getenv("INTRADAY_MIN_TRADES_1M", "50")),
+            "buy_pressure_ratio": float(os.getenv("INTRADAY_BUY_PRESSURE_RATIO", "1.1")),
+            "buy_pressure_window": int(os.getenv("INTRADAY_BUY_PRESSURE_WINDOW", "2")),
+            "max_session_trades": int(os.getenv("INTRADAY_MAX_SESSION_TRADES", "100")),
         }
         self.intraday_sync_limits = os.getenv("INTRADAY_SYNC_LIMITS", "true").lower() == "true"
         self.intraday_reset_on_start = os.getenv("INTRADAY_RESET_ON_START", "true").lower() == "true"
         self.intraday_disable_stop = os.getenv("INTRADAY_DISABLE_STOP", "false").lower() == "true"
-        self.intraday_trend_filter = os.getenv("INTRADAY_TREND_FILTER", "ema25").lower()
+        self.intraday_trend_filter = os.getenv("INTRADAY_TREND_FILTER", "none").lower()
         self.intraday_volume_min_mult = float(os.getenv("INTRADAY_VOL_MIN_MULT", "0.8"))
         self.intraday_pump_5m_pct = float(os.getenv("INTRADAY_PUMP_5M_PCT", "1.5"))
         self.intraday_pump_30m_pct = float(os.getenv("INTRADAY_PUMP_30M_PCT", "3.0"))
+        self.intraday_entry_max_from_low_pct = float(os.getenv("INTRADAY_ENTRY_MAX_FROM_LOW_PCT", "1.0"))
+        self.intraday_entry_bounce_min_pct = float(os.getenv("INTRADAY_ENTRY_BOUNCE_MIN_PCT", "0.2"))
+        self.intraday_entry_low_recency_bars = int(os.getenv("INTRADAY_ENTRY_LOW_RECENCY_BARS", "10"))
+        self.intraday_strict_rebound_enabled = os.getenv("INTRADAY_STRICT_REBOUND_ENABLED", "true").lower() == "true"
+        self.intraday_entry_max_range_position = float(os.getenv("INTRADAY_ENTRY_MAX_RANGE_POSITION", "0.35"))
+        self.intraday_orderflow_max_age_ms = int(os.getenv("INTRADAY_ORDERFLOW_MAX_AGE_MS", "70000"))
         self.intraday_live_confirm = os.getenv("INTRADAY_LIVE_CONFIRM", "true").lower() == "true"
         self.intraday_cooldown_sec = int(os.getenv("INTRADAY_COOLDOWN_SEC", "600"))
         self.intraday_loss_exit_pct = float(os.getenv("INTRADAY_LOSS_EXIT_PCT", "2.0"))
@@ -130,7 +141,7 @@ class TradingManager:
         self.intraday_loss_red_ratio = float(os.getenv("INTRADAY_LOSS_RED_RATIO", "0.6"))
         self.intraday_trend_slope_lookback = int(os.getenv("INTRADAY_TREND_SLOPE_LOOKBACK", "5"))
         self.intraday_trend_slope_min = float(os.getenv("INTRADAY_TREND_SLOPE_MIN", "0.0"))
-        self.intraday_bearish_block_enabled = os.getenv("INTRADAY_BEARISH_BLOCK_ENABLED", "true").lower() == "true"
+        self.intraday_bearish_block_enabled = os.getenv("INTRADAY_BEARISH_BLOCK_ENABLED", "false").lower() == "true"
         self.intraday_bearish_lookback = int(os.getenv("INTRADAY_BEARISH_LOOKBACK", "8"))
         self.intraday_trend_exit_pct = float(os.getenv("INTRADAY_TREND_EXIT_PCT", "0.7"))
         # Binance live trading settings
@@ -218,6 +229,8 @@ class TradingManager:
     def reset(self):
         # First halt all loops so nothing runs immediately after reset
         self.stop()
+        self.intraday_session_completed_trades = 0
+        self.intraday_session_started_at = None
         # Clear all trade logs
         conn = None
         cur = None
@@ -270,6 +283,8 @@ class TradingManager:
         self.intraday_paper = paper
         self.paper_trading = paper
         self.hybrid_enabled = False
+        self.intraday_session_completed_trades = 0
+        self.intraday_session_started_at = time.time()
         self.strategy_mode = "intraday"
         self.intraday_thread = threading.Thread(target=self._run_intraday_loop, daemon=True)
         self.intraday_thread.start()
@@ -1020,6 +1035,7 @@ class TradingManager:
                 )
             except Exception:
                 pass
+            self.intraday_session_completed_trades += 1
         # Track stop exits for potential re-entry logic
         try:
             if "stop" in (reason or "").lower() or "sl" in (reason or "").lower():
@@ -1125,8 +1141,8 @@ class TradingManager:
                         profit, stoploss, stoploss_limit, amount, number_of_trades,
                         pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult,
                         bounce_pct, bounce_lookback, avoid_top_pct, near_low_enabled, near_low_pct, near_low_bounce_pct,
-                        trades_filter_enabled, min_trades_1m
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        trades_filter_enabled, min_trades_1m, buy_pressure_ratio, buy_pressure_window, max_session_trades
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 ),
                 (
@@ -1151,6 +1167,9 @@ class TradingManager:
                     self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
+                    self.intraday_default_limits["buy_pressure_ratio"],
+                    self.intraday_default_limits["buy_pressure_window"],
+                    self.intraday_default_limits["max_session_trades"],
                 ),
             )
         elif self.intraday_sync_limits:
@@ -1162,7 +1181,7 @@ class TradingManager:
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
                         bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, near_low_enabled = ?, near_low_pct = ?, near_low_bounce_pct = ?,
-                        trades_filter_enabled = ?, min_trades_1m = ?
+                        trades_filter_enabled = ?, min_trades_1m = ?, buy_pressure_ratio = ?, buy_pressure_window = ?, max_session_trades = ?
                     """
                 ),
                 (
@@ -1187,6 +1206,9 @@ class TradingManager:
                     self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
+                    self.intraday_default_limits["buy_pressure_ratio"],
+                    self.intraday_default_limits["buy_pressure_window"],
+                    self.intraday_default_limits["max_session_trades"],
                 ),
             )
 
@@ -1243,11 +1265,14 @@ class TradingManager:
                 "near_low_bounce_pct",
                 "trades_filter_enabled",
                 "min_trades_1m",
+                "buy_pressure_ratio",
+                "buy_pressure_window",
+                "max_session_trades",
             ]:
                 if key in updates and updates[key] is not None:
                     try:
                         val = updates[key]
-                        if key in ("pump_pullback_enabled", "bounce_lookback", "trades_filter_enabled", "min_trades_1m", "near_low_enabled") or key.endswith("count") or key == "number_of_trades":
+                        if key in ("pump_pullback_enabled", "bounce_lookback", "trades_filter_enabled", "min_trades_1m", "near_low_enabled", "buy_pressure_window", "max_session_trades") or key.endswith("count") or key == "number_of_trades":
                             self.intraday_default_limits[key] = int(val)
                         else:
                             self.intraday_default_limits[key] = float(val)
@@ -1262,7 +1287,7 @@ class TradingManager:
                         profit = ?, stoploss = ?, stoploss_limit = ?, amount = ?, number_of_trades = ?,
                         pump_pullback_enabled = ?, pump_threshold_pct = ?, pullback_atr_mult = ?, pullback_range_mult = ?,
                         bounce_pct = ?, bounce_lookback = ?, avoid_top_pct = ?, near_low_enabled = ?, near_low_pct = ?, near_low_bounce_pct = ?,
-                        trades_filter_enabled = ?, min_trades_1m = ?
+                        trades_filter_enabled = ?, min_trades_1m = ?, buy_pressure_ratio = ?, buy_pressure_window = ?, max_session_trades = ?
                     """
                 ),
                 (
@@ -1287,6 +1312,9 @@ class TradingManager:
                     self.intraday_default_limits["near_low_bounce_pct"],
                     self.intraday_default_limits["trades_filter_enabled"],
                     self.intraday_default_limits["min_trades_1m"],
+                    self.intraday_default_limits["buy_pressure_ratio"],
+                    self.intraday_default_limits["buy_pressure_window"],
+                    self.intraday_default_limits["max_session_trades"],
                 ),
             )
             conn.commit()
@@ -1308,7 +1336,8 @@ class TradingManager:
             """
             SELECT margin3count, margin5count, margin10count, margin20count, profit, stoploss, stoploss_limit, amount, number_of_trades,
                    pump_pullback_enabled, pump_threshold_pct, pullback_atr_mult, pullback_range_mult, bounce_pct, bounce_lookback,
-                   avoid_top_pct, near_low_enabled, near_low_pct, near_low_bounce_pct, trades_filter_enabled, min_trades_1m
+                   avoid_top_pct, near_low_enabled, near_low_pct, near_low_bounce_pct, trades_filter_enabled, min_trades_1m,
+                   buy_pressure_ratio, buy_pressure_window, max_session_trades
             FROM intraday_limits
             LIMIT 1
             """
@@ -1338,6 +1367,9 @@ class TradingManager:
             "near_low_bounce_pct": float(row[18] or 0.0),
             "trades_filter_enabled": int(row[19] or 0),
             "min_trades_1m": int(row[20] or 0),
+            "buy_pressure_ratio": float(row[21] or 0.0),
+            "buy_pressure_window": int(row[22] or 0),
+            "max_session_trades": int(row[23] or 0),
         }
 
     def _intraday_counts(self, cur) -> dict:
@@ -1467,27 +1499,78 @@ class TradingManager:
         except Exception:
             return False
 
-    def _intraday_near_low_ok_live(self, candles: List[list], price: float, limits: dict) -> bool:
+    def _intraday_bottom_reversal_ok_legacy(self, lows: List[float], closes: List[float], price: float, limits: dict) -> bool:
+        """
+        Previous rebound logic kept here so we can flip back quickly if needed.
+        """
         try:
-            if not limits.get("near_low_enabled"):
-                return True
-            near_pct = float(limits.get("near_low_pct") or 0.0)
-            bounce_pct = float(limits.get("near_low_bounce_pct") or 0.0)
-            if near_pct <= 0 and bounce_pct <= 0:
-                return True
-            chron = list(reversed(candles))  # oldest -> newest
-            recent = chron[-30:] if len(chron) >= 30 else chron
-            lows = [float(c[3]) for c in recent if c and len(c) > 3]
-            if len(lows) < 5:
+            if not lows or not closes or len(lows) < 5 or len(closes) < 5:
                 return False
             recent_low = min(lows)
             if recent_low <= 0 or price <= 0:
                 return False
+
+            near_pct = float(limits.get("near_low_pct") or 0.0)
+            bounce_pct = float(limits.get("near_low_bounce_pct") or 0.0)
+            if near_pct <= 0:
+                near_pct = float(self.intraday_entry_max_from_low_pct or 0.0)
+            if bounce_pct <= 0:
+                bounce_pct = float(self.intraday_entry_bounce_min_pct or 0.0)
+
+            # Do not buy if price already ran too far from the recent low.
             if near_pct > 0 and price > recent_low * (1 + near_pct / 100.0):
                 return False
+            # Buy only after a small confirmed bounce from that low.
             if bounce_pct > 0 and price < recent_low * (1 + bounce_pct / 100.0):
                 return False
+
+            # The low must be recent, otherwise this is a stale rebound.
+            try:
+                low_idx = lows.index(recent_low)  # lows are newest-first
+            except ValueError:
+                return False
+            recency_bars = max(1, int(self.intraday_entry_low_recency_bars or 30))
+            if low_idx > recency_bars:
+                return False
+
+            # Rising confirmation: current tick above previous close and not weakening.
+            if price <= closes[1]:
+                return False
             return True
+        except Exception:
+            return False
+
+    def _intraday_bottom_reversal_ok(self, lows: List[float], highs: List[float], closes: List[float], price: float, limits: dict) -> bool:
+        """
+        Stricter rebound gate: still use the legacy near-low+bounce logic, but
+        also reject entries that already traveled too far up the local rebound range.
+        """
+        try:
+            if not self._intraday_bottom_reversal_ok_legacy(lows, closes, price, limits):
+                return False
+            if not self.intraday_strict_rebound_enabled:
+                return True
+            if not highs or len(highs) < 5:
+                return False
+            recent_low = min(lows)
+            recent_high = max(highs)
+            if recent_high <= recent_low:
+                return False
+            range_pos = (price - recent_low) / (recent_high - recent_low)
+            max_range_pos = float(self.intraday_entry_max_range_position or 0.0)
+            if max_range_pos > 0 and range_pos > max_range_pos:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _intraday_near_low_ok_live(self, candles: List[list], price: float, limits: dict) -> bool:
+        try:
+            recent = candles[:30] if len(candles) >= 30 else candles
+            lows = [float(c[3]) for c in recent if c and len(c) > 3]
+            highs = [float(c[2]) for c in recent if c and len(c) > 2]
+            closes = [float(c[4]) for c in recent if c and len(c) > 4]
+            return self._intraday_bottom_reversal_ok(lows, highs, closes, price, limits)
         except Exception:
             return False
 
@@ -1514,30 +1597,45 @@ class TradingManager:
             return False
 
     def _intraday_trades_ok(self, cur, symbol: str, limits: dict) -> bool:
-        """Require a minimum number of trades in the last 1 minute (orderflow table)."""
+        """
+        Require fresh orderflow plus sustained buy pressure near the recent low.
+        This replaces separate volume-vs-trade-count gating with one live signal.
+        """
         try:
             if not limits.get("trades_filter_enabled"):
                 return True
             min_trades = int(limits.get("min_trades_1m") or 0)
-            if min_trades <= 0:
-                return True
+            window = max(1, int(limits.get("buy_pressure_window") or 0) or 1)
+            buy_ratio = float(limits.get("buy_pressure_ratio") or 0.0)
             cur.execute(
                 self._q(
-                    "SELECT buy_count, sell_count, ts FROM orderflow WHERE symbol = ? ORDER BY ts DESC LIMIT 1"
+                    "SELECT buy_volume, sell_volume, buy_count, sell_count, ts FROM orderflow WHERE symbol = ? ORDER BY ts DESC LIMIT ?"
                 ),
-                (symbol,),
+                (symbol, window),
             )
-            row = cur.fetchone()
-            if not row:
+            rows = cur.fetchall()
+            if not rows:
                 return False
-            buy_cnt = int(row[0] or 0)
-            sell_cnt = int(row[1] or 0)
-            ts = int(row[2] or 0)
+            latest_ts = int(rows[0][4] or 0)
             now = int(time.time() * 1000)
-            if ts <= 0 or (now - ts) > 70000:
+            if latest_ts <= 0 or (now - latest_ts) > int(self.intraday_orderflow_max_age_ms or 70000):
                 return False
+            buy_vol = sum(float(r[0] or 0.0) for r in rows)
+            sell_vol = sum(float(r[1] or 0.0) for r in rows)
+            buy_cnt = sum(int(r[2] or 0) for r in rows)
+            sell_cnt = sum(int(r[3] or 0) for r in rows)
             total = buy_cnt + sell_cnt
-            return total >= min_trades
+            if min_trades > 0 and total < min_trades:
+                return False
+            if buy_cnt <= 0 and buy_vol <= 0:
+                return False
+            if buy_cnt < sell_cnt:
+                return False
+            if sell_vol <= 0:
+                return buy_vol > 0
+            if buy_ratio <= 0:
+                buy_ratio = 1.0
+            return buy_vol >= sell_vol * buy_ratio
         except Exception:
             return False
 
@@ -1647,17 +1745,42 @@ class TradingManager:
         except Exception:
             return False
 
+    def _latest_unique_1m_candles(self, cur, symbol: str, limit: int = 30) -> List[tuple]:
+        """
+        Return latest 1m candles deduplicated by timestamp.
+        This avoids using repeated rows that can shrink a 30-row window to just
+        a few real minutes.
+        """
+        try:
+            limit = max(1, int(limit))
+            cur.execute(
+                self._q(
+                    """
+                    SELECT c.ts, c.open, c.high, c.low, c.close, c.volume
+                    FROM candles c
+                    INNER JOIN (
+                        SELECT MAX(id) AS id
+                        FROM candles
+                        WHERE symbol = ? AND timeframe = ?
+                        GROUP BY ts
+                    ) t ON t.id = c.id
+                    ORDER BY c.ts DESC
+                    LIMIT ?
+                    """
+                ),
+                (symbol, "1m", limit),
+            )
+            return cur.fetchall() or []
+        except Exception:
+            return []
+
     def _intraday_recent_pump_ok(self, cur, symbol: str) -> bool:
         """Skip coins that pumped too much in last 5/30 minutes."""
         try:
-            cur.execute(
-                self._q("SELECT close FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 30"),
-                (symbol, "1m"),
-            )
-            rows = cur.fetchall()
+            rows = self._latest_unique_1m_candles(cur, symbol, limit=30)
             if not rows or len(rows) < 30:
                 return True  # not enough data, don't block
-            closes = [float(r[0]) for r in rows if r and r[0] is not None]
+            closes = [float(r[4]) for r in rows if r and len(r) > 4 and r[4] is not None]
             if len(closes) < 30:
                 return True
             last = closes[0]
@@ -1697,48 +1820,23 @@ class TradingManager:
     def _intraday_near_low_ok(self, cur, symbol: str, price: float, limits: dict) -> bool:
         """Require price to be near the recent low and bounced off it."""
         try:
-            if not limits.get("near_low_enabled"):
-                return True
-            near_pct = float(limits.get("near_low_pct") or 0.0)
-            bounce_pct = float(limits.get("near_low_bounce_pct") or 0.0)
-            if near_pct <= 0 and bounce_pct <= 0:
-                return True
-            cur.execute(
-                self._q("SELECT low FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 30"),
-                (symbol, "1m"),
-            )
-            rows = cur.fetchall()
-            lows = [float(r[0]) for r in rows if r and r[0] is not None]
-            if len(lows) < 5:
-                return False
-            recent_low = min(lows)
-            if recent_low <= 0 or price <= 0:
-                return False
-            # Price must be within near_low_pct above the low
-            if near_pct > 0:
-                if price > recent_low * (1 + near_pct / 100.0):
-                    return False
-            # And it must have bounced at least bounce_pct above the low
-            if bounce_pct > 0:
-                if price < recent_low * (1 + bounce_pct / 100.0):
-                    return False
-            return True
+            rows = self._latest_unique_1m_candles(cur, symbol, limit=30)
+            closes = [float(r[4]) for r in rows if r and len(r) > 4 and r[4] is not None]
+            lows = [float(r[3]) for r in rows if r and len(r) > 3 and r[3] is not None]
+            highs = [float(r[2]) for r in rows if r and len(r) > 2 and r[2] is not None]
+            return self._intraday_bottom_reversal_ok(lows, highs, closes, price, limits)
         except Exception:
             return False
 
     def _intraday_pump_pullback_ok(self, cur, symbol: str, limits: dict) -> bool:
         """If a coin pumped, require a pullback + bounce before allowing a buy."""
         try:
-            cur.execute(
-                self._q("SELECT close, high, low FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY ts DESC LIMIT 30"),
-                (symbol, "1m"),
-            )
-            rows = cur.fetchall()
+            rows = self._latest_unique_1m_candles(cur, symbol, limit=30)
             if not rows or len(rows) < 30:
                 return True
-            closes = [float(r[0]) for r in rows if r and r[0] is not None]
-            highs = [float(r[1]) for r in rows if r and r[1] is not None]
-            lows = [float(r[2]) for r in rows if r and r[2] is not None]
+            closes = [float(r[4]) for r in rows if r and len(r) > 4 and r[4] is not None]
+            highs = [float(r[2]) for r in rows if r and len(r) > 2 and r[2] is not None]
+            lows = [float(r[3]) for r in rows if r and len(r) > 3 and r[3] is not None]
             if len(closes) < 30 or len(highs) < 30 or len(lows) < 30:
                 return True
             current = closes[0]
@@ -1891,47 +1989,9 @@ class TradingManager:
         if not closes or len(closes) < 30:
             logging.warning(f"Live entry blocked for {symbol}: insufficient close data")
             return False
-        # Live trend filter using fresh EMA values
-        ema25 = self._ema(closes, 25)
-        ema7 = self._ema(closes, 7)
-        if self.intraday_trend_filter != "none":
-            if ema25 is None or ema25 <= 0:
-                logging.warning(f"Live entry blocked for {symbol}: missing EMA25")
-                return False
-            if self.intraday_trend_filter == "ema25" and live_price < ema25:
-                logging.info(f"Live entry blocked for {symbol}: price below EMA25")
-                return False
-            if self.intraday_trend_filter == "ema7_ema25":
-                if ema7 is None or ema7 <= ema25:
-                    logging.info(f"Live entry blocked for {symbol}: EMA7 <= EMA25")
-                    return False
-            # Optional slope check
-            lookback = max(2, int(self.intraday_trend_slope_lookback or 0))
-            slope_min = float(self.intraday_trend_slope_min or 0.0)
-            if lookback > 1 and slope_min >= 0 and len(closes) > lookback:
-                ema_prev = self._ema(closes[:-lookback], 25)
-                if ema_prev and ema_prev > 0:
-                    slope_pct = (ema25 - ema_prev) / ema_prev * 100.0
-                    if slope_pct < slope_min:
-                        logging.info(f"Live entry blocked for {symbol}: EMA25 slope {slope_pct:.3f}% < {slope_min}%")
-                        return False
-        # Bearish pattern block using live candles
-        if self._intraday_bearish_block_live(candles, live_price):
-            logging.info(f"Live entry blocked for {symbol}: bearish pattern (live)")
-            return False
-        # Require near-low + bounce if enabled
         if not self._intraday_near_low_ok_live(candles, live_price, limits):
             logging.info(f"Live entry blocked for {symbol}: not near low + bounce (live)")
             return False
-        # Always apply recent pump block using live candles
-        if not self._intraday_recent_pump_ok_live(closes):
-            logging.info(f"Live entry blocked for {symbol}: recent pump too strong")
-            return False
-        # If pump/pullback is enabled, validate using live candles + live price
-        if limits.get("pump_pullback_enabled"):
-            if not self._intraday_pump_pullback_ok_live(candles, limits, live_price):
-                logging.info(f"Live entry blocked for {symbol}: pump/pullback not satisfied (live)")
-                return False
         return True
 
     def _seed_intraday_state(self, cur, pg: bool, reset: bool):
@@ -1982,6 +2042,20 @@ class TradingManager:
         )
 
     def _open_intraday_position(self, cur, symbol: str, price: float, amount: float, profit_pct: float, stop_pct: float, limits: dict) -> bool:
+        cur.execute(
+            self._q(
+                """
+                SELECT 1
+                FROM paper_positions
+                WHERE symbol = ? AND status = 'OPEN' AND entry_type = 'intraday'
+                LIMIT 1
+                """
+            ),
+            (symbol,),
+        )
+        if cur.fetchone():
+            logging.info(f"Skipped duplicate intraday BUY for {symbol}: position already open")
+            return False
         cash = self._get_cash(cur)
         if cash <= 0 or amount <= 0 or price <= 0:
             return False
@@ -2179,10 +2253,19 @@ class TradingManager:
                 unlimited_trades = raw_trades <= 0
                 trades_count = max(1, raw_trades)
                 per_trade_amount = float(limits.get("amount") or 0.0) / (1 if unlimited_trades else trades_count)
+                max_session_trades = max(0, int(limits.get("max_session_trades") or 0))
 
                 # Manage open intraday positions
                 if self._manage_intraday_positions(cur):
                     conn.commit()
+
+                if max_session_trades > 0 and self.intraday_session_completed_trades >= max_session_trades:
+                    try:
+                        cur.close(); conn.close()
+                    except Exception:
+                        pass
+                    time.sleep(self.intraday_loop_sec)
+                    continue
 
                 # Enforce max open positions = number_of_trades
                 open_positions = self._intraday_open_positions(cur)
@@ -2196,14 +2279,6 @@ class TradingManager:
                     time.sleep(self.intraday_loop_sec)
                     continue
 
-                counts = self._intraday_counts(cur)
-                max_mar3 = int(limits.get("margin3count") or 0)
-                max_mar5 = int(limits.get("margin5count") or 0)
-                max_mar10 = int(limits.get("margin10count") or 0)
-                max_mar20 = int(limits.get("margin20count") or 0)
-                if unlimited_trades:
-                    # When unlimited, don't cap the number of entries by margin counts.
-                    max_mar3 = max_mar5 = max_mar10 = max_mar20 = 10**9
                 # Build price map once per loop
                 cur.execute("SELECT symbol, latest_price FROM coin_monitor")
                 price_map = {row[0]: float(row[1]) for row in cur.fetchall() if row and row[1] is not None}
@@ -2217,7 +2292,9 @@ class TradingManager:
                 )
                 rows = cur.fetchall()
                 for row in rows:
-                    if open_count >= trades_count:
+                    if not unlimited_trades and open_count >= trades_count:
+                        break
+                    if max_session_trades > 0 and self.intraday_session_completed_trades >= max_session_trades:
                         break
                     symbol, margin3, margin5, margin10, margin20, mar3, mar5, mar10, mar20 = row
                     price = price_map.get(symbol)
@@ -2227,54 +2304,19 @@ class TradingManager:
                         continue
                     if not self._intraday_cooldown_ok(symbol):
                         continue
-                    if not self._intraday_trend_ok(cur, symbol, price):
+                    if not self._intraday_trades_ok(cur, symbol, limits):
                         continue
                     if not self._intraday_near_low_ok(cur, symbol, price, limits):
                         continue
-                    if self._intraday_bearish_block(cur, symbol, price):
+                    if mar3 or mar5 or mar10 or mar20:
                         continue
-                    if not self._intraday_volume_ok(cur, symbol):
-                        continue
-                    if not self._intraday_trades_ok(cur, symbol, limits):
-                        continue
-                    if limits.get("pump_pullback_enabled"):
-                        if not self._intraday_pump_pullback_ok(cur, symbol, limits):
-                            continue
-                    else:
-                        if not self._intraday_recent_pump_ok(cur, symbol):
-                            continue
 
-                    if counts["sum_mar3"] < max_mar3:
-                        if price >= float(margin3 or 0) and not mar3:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                                cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                                counts["sum_mar3"] += 1
-                                open_count += 1
-                            continue
-
-                    if counts["sum_mar5"] < max_mar5:
-                        if price >= float(margin5 or 0) and not mar5:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                                cur.execute(self._q("UPDATE intraday_trading SET mar5 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                                counts["sum_mar5"] += 1
-                                open_count += 1
-                            continue
-
-                    if counts["sum_mar10"] < max_mar10:
-                        if price >= float(margin10 or 0) and not mar10:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                                cur.execute(self._q("UPDATE intraday_trading SET mar10 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                                counts["sum_mar10"] += 1
-                                open_count += 1
-                            continue
-
-                    if counts["sum_mar20"] < max_mar20:
-                        if price >= float(margin20 or 0) and not mar20:
-                            if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
-                                cur.execute(self._q("UPDATE intraday_trading SET mar20 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
-                                counts["sum_mar20"] += 1
-                                open_count += 1
-                            continue
+                    if self._open_intraday_position(cur, symbol, price, per_trade_amount, limits["profit"], limits["stoploss"], limits):
+                        # Keep using mar3/status flags for lifecycle reset compatibility.
+                        cur.execute(self._q("UPDATE intraday_trading SET mar3 = TRUE, status = '1', purchase_price = ? WHERE symbol = ?"), (price, symbol))
+                        open_count += 1
+                        open_symbols.add(symbol)
+                    continue
 
                 conn.commit()
                 try:

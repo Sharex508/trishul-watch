@@ -412,12 +412,15 @@ def initialize_coin_monitor(symbols=None):
             for data in insert_data:
                 cursor.execute(insert_query, data)
 
-                # Initialize price history for each new coin
+            connection.commit()
+
+            # Initialize cycle-1 history after commit so separate SQLite
+            # connections do not contend on the same write transaction.
+            for data in insert_data:
                 symbol = data[0]
                 price = data[1]
                 initialize_price_history(symbol, price)
 
-            connection.commit()
             logging.info(f"Initialized {len(insert_data)} new coins in coin_monitor table with varied price history.")
             return True
         else:

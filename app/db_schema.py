@@ -704,7 +704,10 @@ def ensure_intraday_tables(cur, pg: bool):
                 near_low_pct DOUBLE PRECISION,
                 near_low_bounce_pct DOUBLE PRECISION,
                 trades_filter_enabled INTEGER DEFAULT 1,
-                min_trades_1m INTEGER
+                min_trades_1m INTEGER,
+                buy_pressure_ratio DOUBLE PRECISION,
+                buy_pressure_window INTEGER,
+                max_session_trades INTEGER
             )
             """
         )
@@ -721,6 +724,9 @@ def ensure_intraday_tables(cur, pg: bool):
         add_col(cur, "intraday_limits", "near_low_bounce_pct", "DOUBLE PRECISION", pg=pg)
         add_col(cur, "intraday_limits", "trades_filter_enabled", "INTEGER", "DEFAULT 1", pg=pg)
         add_col(cur, "intraday_limits", "min_trades_1m", "INTEGER", pg=pg)
+        add_col(cur, "intraday_limits", "buy_pressure_ratio", "DOUBLE PRECISION", pg=pg)
+        add_col(cur, "intraday_limits", "buy_pressure_window", "INTEGER", pg=pg)
+        add_col(cur, "intraday_limits", "max_session_trades", "INTEGER", pg=pg)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS intraday_trading (
@@ -773,7 +779,10 @@ def ensure_intraday_tables(cur, pg: bool):
                 near_low_pct REAL,
                 near_low_bounce_pct REAL,
                 trades_filter_enabled INTEGER DEFAULT 1,
-                min_trades_1m INTEGER
+                min_trades_1m INTEGER,
+                buy_pressure_ratio REAL,
+                buy_pressure_window INTEGER,
+                max_session_trades INTEGER
             )
             """
         )
@@ -783,6 +792,9 @@ def ensure_intraday_tables(cur, pg: bool):
         add_col(cur, "intraday_limits", "near_low_bounce_pct", "REAL", pg=pg)
         add_col(cur, "intraday_limits", "trades_filter_enabled", "INTEGER", "DEFAULT 1", pg=pg)
         add_col(cur, "intraday_limits", "min_trades_1m", "INTEGER", pg=pg)
+        add_col(cur, "intraday_limits", "buy_pressure_ratio", "REAL", pg=pg)
+        add_col(cur, "intraday_limits", "buy_pressure_window", "INTEGER", pg=pg)
+        add_col(cur, "intraday_limits", "max_session_trades", "INTEGER", pg=pg)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS intraday_trading (

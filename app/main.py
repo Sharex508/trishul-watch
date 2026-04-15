@@ -100,15 +100,15 @@ price_monitor_thread = None
 def startup_price_update():
     """Start the background task when the app starts."""
     global price_monitor_thread
-    # Start the price monitor that updates every 2 seconds
-    price_monitor_thread = start_price_monitor()
     try:
-        # Ensure we have symbols to work with; seed top USDT movers if empty
+        # Seed before starting monitor thread to avoid startup-time DB lock contention.
         seeded = seed_coin_monitor_if_empty()
         if seeded:
             logging.info(f"Seeded {seeded} symbols into coin_monitor")
     except Exception as e:
         logging.warning(f"Seeding coin_monitor failed at startup: {e}")
+    # Start the price monitor after seeding.
+    price_monitor_thread = start_price_monitor()
     # Start AI background jobs (candles + features)
     try:
         start_ai_background_jobs()
@@ -135,6 +135,8 @@ def trading_status():
             "strategy_mode": trading_manager.strategy_mode,
             "hybrid_enabled": getattr(trading_manager, "hybrid_enabled", True),
             "intraday_enabled": getattr(trading_manager, "intraday_enabled", False),
+            "intraday_session_completed_trades": getattr(trading_manager, "intraday_session_completed_trades", 0),
+            "intraday_session_started_at": getattr(trading_manager, "intraday_session_started_at", None),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

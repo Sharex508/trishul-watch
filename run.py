@@ -74,7 +74,7 @@ def initialize_tables():
 def run_api():
     """Run the FastAPI application."""
     try:
-        os.chdir('app')
+        project_root = os.path.dirname(os.path.abspath(__file__))
         host = os.getenv('API_HOST', '0.0.0.0')
         port = int(os.getenv('API_PORT', '8001'))  # Changed default port to 8001
         debug = os.getenv('DEBUG', 'True').lower() in ('true', '1', 't')
@@ -84,12 +84,12 @@ def run_api():
         for port_attempt in range(max_port_attempts):
             try:
                 current_port = port + port_attempt
-                cmd = ['uvicorn', 'main:app', '--host', host, '--port', str(current_port)]
+                cmd = [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', host, '--port', str(current_port)]
                 if debug:
                     cmd.append('--reload')
 
                 logging.info(f"Starting API server at http://{host}:{current_port}")
-                subprocess.run(cmd, check=True)
+                subprocess.run(cmd, check=True, cwd=project_root)
                 return True
             except subprocess.CalledProcessError as e:
                 if port_attempt < max_port_attempts - 1:
